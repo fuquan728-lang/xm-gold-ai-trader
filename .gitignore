@@ -76,3 +76,28 @@ uninstall.exe
 # Model/weight artifacts
 weights/
 test_weights/
+
+# MT5 platform bundled libraries/examples - do not version full terminal tree
+MQL5/Include/
+MQL5/Indicators/Examples/
+MQL5/Scripts/Examples/
+MQL5/Scripts/UnitTests/
+MQL5/Experts/Examples/
+MQL5/Experts/Free Robots/
+MQL5/experts.dat
+
+# Runtime/generated trade data
+data/demo_close_positions.jsonl
+data/demo_micro_orders.jsonl
+data/paper_trades.jsonl
+
+# Generated/old test artifacts
+tests/ab_test_results.json
+test_output.txt
+test_utf16.json
+performance_results.json
+async_integration_validation_report.json
+concurrent_fairness_improvement_report.json
+
+# Local planning/session outputs
+opc-doc/
