@@ -1,0 +1,78 @@
+
+# Environment variables (CRITICAL: Never commit this!)
+.env
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+
+# MT5 compiled files
+*.ex5
+*.ex4
+*.dll
+
+# Trading system generated files
+MQL5/Files/ai_request.json
+MQL5/Files/ai_response.json
+MQL5/Files/mt5_account.json
+MQL5/Files/MQL5/Files/ai_request.json
+MQL5/Files/MQL5/Files/ai_response.json
+MQL5/Files/MQL5/Files/mt5_account.json
+MQL5/Files/*.lock
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# Local MT5 terminal/account data
+Bases/
+Config/
+Profiles/
+
+# Logs and temporary files
+*.log
+logs/
+temp/
+*.tmp
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test/cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local assistant/tool state
+.learnings/
+.trae/
+.workbuddy/
+
+# Generated reports / archives
+reports/
+archive/
+
+# Large local MT5 binaries
+MetaEditor64.exe
+metatester64.exe
+terminal64.exe
+uninstall.exe
+
+# Model/weight artifacts
+weights/
+test_weights/

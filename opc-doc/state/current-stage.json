@@ -1,0 +1,15 @@
+{
+  "current_stage": "04-business-model",
+  "status": "completed",
+  "paused": true,
+  "paused_at": "2026-05-22T19:39+08:00",
+  "next_stage": "06-mvp-design",
+  "previous_stages": [
+    {"stage": "01-resource-audit", "status": "completed", "completed_at": "2026-05-22T19:02+08:00"},
+    {"stage": "02-niche-positioning", "status": "completed", "completed_at": "2026-05-22T19:10+08:00"},
+    {"stage": "03-value-proposition", "status": "completed", "completed_at": "2026-05-22T19:31+08:00"},
+    {"stage": "04-business-model", "status": "completed", "completed_at": "2026-05-22T19:39+08:00"}
+  ],
+  "skipped_stages": [],
+  "updated_at": "2026-05-22T19:39+08:00"
+}

@@ -1,0 +1,100 @@
+{
+  "timestamp": "2026-04-23T11:01:54.727136",
+  "test_cases_count": 10,
+  "metrics": {
+    "original": {
+      "total": 10,
+      "correct": 1,
+      "hold_correct": 1,
+      "hold_total": 1
+    },
+    "optimized": {
+      "total": 10,
+      "correct": 1,
+      "hold_correct": 1,
+      "hold_total": 1
+    }
+  },
+  "results": [
+    {
+      "case_id": 0,
+      "expected_action": "BUY",
+      "original_action": "HOLD",
+      "original_correct": false,
+      "optimized_action": "HOLD",
+      "optimized_correct": false
+    },
+    {
+      "case_id": 1,
+      "expected_action": "BUY",
+      "original_action": "HOLD",
+      "original_correct": false,
+      "optimized_action": "HOLD",
+      "optimized_correct": false
+    },
+    {
+      "case_id": 2,
+      "expected_action": "SELL",
+      "original_action": "HOLD",
+      "original_correct": false,
+      "optimized_action": "HOLD",
+      "optimized_correct": false
+    },
+    {
+      "case_id": 3,
+      "expected_action": "BUY",
+      "original_action": "HOLD",
+      "original_correct": false,
+      "optimized_action": "HOLD",
+      "optimized_correct": false
+    },
+    {
+      "case_id": 4,
+      "expected_action": "SELL",
+      "original_action": "HOLD",
+      "original_correct": false,
+      "optimized_action": "HOLD",
+      "optimized_correct": false
+    },
+    {
+      "case_id": 5,
+      "expected_action": "BUY",
+      "original_action": "HOLD",
+      "original_correct": false,
+      "optimized_action": "HOLD",
+      "optimized_correct": false
+    },
+    {
+      "case_id": 6,
+      "expected_action": "SELL",
+      "original_action": "HOLD",
+      "original_correct": false,
+      "optimized_action": "HOLD",
+      "optimized_correct": false
+    },
+    {
+      "case_id": 7,
+      "expected_action": "BUY",
+      "original_action": "HOLD",
+      "original_correct": false,
+      "optimized_action": "HOLD",
+      "optimized_correct": false
+    },
+    {
+      "case_id": 8,
+      "expected_action": "HOLD",
+      "original_action": "HOLD",
+      "original_correct": true,
+      "optimized_action": "HOLD",
+      "optimized_correct": true
+    },
+    {
+      "case_id": 9,
+      "expected_action": "SELL",
+      "original_action": "HOLD",
+      "original_correct": false,
+      "optimized_action": "HOLD",
+      "optimized_correct": false
+    }
+  ]
+}

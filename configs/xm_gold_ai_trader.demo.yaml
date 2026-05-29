@@ -1,0 +1,25 @@
+# xm-gold-ai-trader default configuration.
+# Safe default: order_send is disabled.
+symbol: GOLD_
+deviation_points: 50
+magic_number: 987656
+order_comment: xm-gold-ai-trader
+
+execution:
+  allow_order_send: false
+  require_demo_account: true
+  require_symbol: GOLD_
+  max_orders_per_day: 1
+  max_positions: 1
+  emergency_stop: false
+
+risk:
+  risk_per_trade_pct: 0.25
+  max_daily_loss_pct: 1.0
+  max_spread_points: 350.0
+  one_position_only: true
+  max_lot_per_trade: null
+  min_stop_distance_points: 1.0
+  allow_martingale: false
+  allow_grid: false
+  allow_lot_increase_after_loss: false
