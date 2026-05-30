@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.5.2-risk-budget-scenario-frontier
+
+- Extended `scripts/strategy_hypothesis_lab.py --json` with a read-only
+  risk-budget frontier for broker `volume_min: 0.01` feasibility.
+- Added account-balance/risk-percentage matrix scenarios:
+  - account balances: `$500`, `$1,000`, `$2,500`, `$5,000`, `$6,000`,
+    `$10,000`
+  - risk percentages: `0.25%`, `0.5%`, `1.0%`
+- Added fixed-dollar risk-budget scenarios:
+  - `$2.50`, `$5.00`, `$10.00`, `$15.00`, `$25.00`
+- Each scenario reports feasible/infeasible candidate counts, feasible
+  percentage, median computed lot, median normalized lot, median risk
+  shortfall, and minimum required balance estimate.
+- Documented current baseline frontier findings: `$2.50` and `$5.00` risk
+  budgets make `0 / 157` candidates feasible, `$10.00` makes `21 / 157`
+  feasible, `$15.00` makes `80 / 157` feasible, and `$25.00` makes
+  `131 / 157` feasible.
+- Added tests proving frontier scenarios remain hypothetical/offline and do not
+  cross order boundaries.
+
+No trading logic, strategy thresholds, risk settings, safety checks, order
+routing, or AI annotation behavior changed. No AI trading, no `order_check`, no
+`order_send`, no martingale, no grid, and no lot increase after loss.
+
 ## v0.5.1-minimum-lot-feasibility-study
 
 - Extended `scripts/strategy_hypothesis_lab.py --json` with a read-only

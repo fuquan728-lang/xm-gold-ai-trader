@@ -37,6 +37,9 @@ MODE = "strategy_hypothesis_lab"
 REASON_NO_HISTORICAL_DATA = "NO_HISTORICAL_DATA"
 REASON_SYMBOL_INFO_UNAVAILABLE = "SYMBOL_INFO_UNAVAILABLE"
 REASON_NO_ACTIONABLE_SIGNAL = "NO_ACTIONABLE_SIGNAL"
+FRONTIER_ACCOUNT_BALANCES = (500.0, 1_000.0, 2_500.0, 5_000.0, 6_000.0, 10_000.0)
+FRONTIER_RISK_PERCENTAGES = (0.25, 0.5, 1.0)
+FRONTIER_FIXED_RISK_BUDGETS = (2.5, 5.0, 10.0, 15.0, 25.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -560,6 +563,11 @@ def minimum_lot_feasibility_summary(
             numeric_values(records, "risk_shortfall_to_min_lot")
         ),
         "hypothetical_risk_budget_scenarios": scenarios,
+        "risk_budget_frontier": risk_budget_frontier_summary(
+            records=records,
+            spec=spec,
+            current_risk_per_trade_pct=risk_config.risk_per_trade_pct,
+        ),
     }
 
 
@@ -612,6 +620,125 @@ def feasibility_scenarios(
             }
         )
     return scenarios
+
+
+def risk_budget_frontier_summary(
+    *,
+    records: list[dict[str, Any]],
+    spec: SymbolSpec,
+    current_risk_per_trade_pct: float,
+) -> dict[str, Any]:
+    matrix = [
+        frontier_row(
+            records=records,
+            spec=spec,
+            scenario_type="account_balance_risk_pct",
+            risk_amount=account_balance * (risk_pct / 100.0),
+            account_balance=account_balance,
+            risk_pct=risk_pct,
+            required_balance_risk_pct=risk_pct,
+        )
+        for account_balance in FRONTIER_ACCOUNT_BALANCES
+        for risk_pct in FRONTIER_RISK_PERCENTAGES
+    ]
+    fixed = [
+        frontier_row(
+            records=records,
+            spec=spec,
+            scenario_type="fixed_risk_budget",
+            risk_amount=risk_budget,
+            fixed_risk_budget=risk_budget,
+            required_balance_risk_pct=current_risk_per_trade_pct,
+        )
+        for risk_budget in FRONTIER_FIXED_RISK_BUDGETS
+    ]
+    return {
+        "hypothetical_only": True,
+        "not_production_settings": True,
+        "broker_volume_min": spec.volume_min,
+        "broker_volume_step": spec.volume_step,
+        "account_balances_tested": list(FRONTIER_ACCOUNT_BALANCES),
+        "risk_percentages_tested": list(FRONTIER_RISK_PERCENTAGES),
+        "fixed_risk_budgets_tested": list(FRONTIER_FIXED_RISK_BUDGETS),
+        "account_balance_risk_pct_matrix": matrix,
+        "fixed_risk_budget_scenarios": fixed,
+        "best_account_balance_risk_pct_scenario": best_frontier_row(matrix),
+        "best_fixed_risk_budget_scenario": best_frontier_row(fixed),
+    }
+
+
+def frontier_row(
+    *,
+    records: list[dict[str, Any]],
+    spec: SymbolSpec,
+    scenario_type: str,
+    risk_amount: float,
+    required_balance_risk_pct: float,
+    account_balance: float | None = None,
+    risk_pct: float | None = None,
+    fixed_risk_budget: float | None = None,
+) -> dict[str, Any]:
+    computed_lots: list[float] = []
+    normalized_lots: list[float] = []
+    risk_shortfalls: list[float] = []
+    required_risk_amounts: list[float] = []
+    feasible_count = 0
+
+    for record in records:
+        risk_per_lot = numeric_or_none(record.get("risk_per_lot"))
+        if risk_per_lot is None or risk_per_lot <= 0:
+            continue
+        minimum_lot_risk_amount = risk_per_lot * spec.volume_min
+        computed_lot = risk_amount / risk_per_lot
+        normalized_lot = floor_volume_to_step(computed_lot, spec.volume_min, spec.volume_max, spec.volume_step)
+        risk_shortfall = max(0.0, minimum_lot_risk_amount - risk_amount)
+
+        computed_lots.append(computed_lot)
+        normalized_lots.append(normalized_lot)
+        risk_shortfalls.append(risk_shortfall)
+        required_risk_amounts.append(minimum_lot_risk_amount)
+        if normalized_lot >= spec.volume_min:
+            feasible_count += 1
+
+    candidate_count = len(required_risk_amounts)
+    infeasible_count = max(0, candidate_count - feasible_count)
+    required_balance_fraction = required_balance_risk_pct / 100.0
+    minimum_required_balance_estimate = (
+        min(required_risk_amounts) / required_balance_fraction
+        if required_risk_amounts and required_balance_fraction > 0
+        else None
+    )
+    row = {
+        "scenario_type": scenario_type,
+        "hypothetical_only": True,
+        "not_production_settings": True,
+        "account_balance": account_balance,
+        "risk_pct": risk_pct,
+        "fixed_risk_budget": fixed_risk_budget,
+        "risk_amount": risk_amount,
+        "candidate_count": candidate_count,
+        "feasible_candidate_count": feasible_count,
+        "infeasible_candidate_count": infeasible_count,
+        "feasible_percentage": feasible_count / candidate_count if candidate_count else 0.0,
+        "median_computed_lot": distribution(computed_lots)["median"],
+        "median_normalized_lot": distribution(normalized_lots)["median"],
+        "median_risk_shortfall": distribution(risk_shortfalls)["median"],
+        "minimum_required_balance_estimate": minimum_required_balance_estimate,
+        "risk_pct_for_required_balance_estimate": required_balance_risk_pct,
+    }
+    return row
+
+
+def best_frontier_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    return max(
+        rows,
+        key=lambda row: (
+            int(row["feasible_candidate_count"]),
+            float(row["risk_amount"]),
+        ),
+    )
 
 
 def numeric_values(records: list[dict[str, Any]], key: str) -> list[float]:

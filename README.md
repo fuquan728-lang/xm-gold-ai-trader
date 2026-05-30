@@ -548,6 +548,25 @@ This remains observation-only. It must not call `order_check`, must not call
 - This checkpoint does not change production strategy behavior, risk settings,
   safety gates, order routing, `allow_order_send`, or AI annotation behavior.
 
+## v0.5.2 Risk-Budget Scenario Frontier
+
+- Release notes:
+  `docs/release_notes/v0.5.2-risk-budget-scenario-frontier.md`.
+- Extended `scripts\strategy_hypothesis_lab.py --json` with
+  `risk_budget_frontier` under the minimum-lot feasibility study.
+- The frontier tests account-balance/risk-percentage combinations:
+  `$500`, `$1,000`, `$2,500`, `$5,000`, `$6,000`, `$10,000` crossed with
+  `0.25%`, `0.5%`, and `1.0%`.
+- It also tests fixed-dollar risk budgets: `$2.50`, `$5.00`, `$10.00`,
+  `$15.00`, and `$25.00`.
+- Current baseline frontier finding: fixed risk budgets of `$2.50` and `$5.00`
+  make `0 / 157` historical crossover candidates feasible; `$10.00` makes
+  `21 / 157` feasible; `$15.00` makes `80 / 157` feasible; `$25.00` makes
+  `131 / 157` feasible.
+- All rows are explicitly hypothetical/offline research. This checkpoint does
+  not change production strategy behavior, risk settings, safety gates, order
+  routing, `allow_order_send`, or AI annotation behavior.
+
 ## v0.2.6 Operational Safety Guarantees
 
 - Default `configs/xm_gold_ai_trader.demo.yaml` has

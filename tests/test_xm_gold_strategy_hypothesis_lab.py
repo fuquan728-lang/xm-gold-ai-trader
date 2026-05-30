@@ -142,6 +142,69 @@ def test_minimum_lot_feasibility_scenarios_can_be_feasible_without_order_paths()
     assert report["order_send_called"] is False
 
 
+def test_risk_budget_frontier_reports_account_and_fixed_budget_scenarios():
+    report = run_strategy_hypothesis_lab(
+        bars=oscillating_bars(),
+        symbol="GOLD_",
+        timeframe="M15",
+        symbol_info=SYMBOL_INFO,
+        trading_config=TradingConfig(risk=RiskConfig(max_spread_points=350)),
+        hypotheses=[risk_gated_crossover("risk_gated")],
+        account_equity=10.0,
+        data_source={"kind": "unit_test"},
+    )
+
+    frontier = report["minimum_lot_feasibility_study"]["risk_budget_frontier"]
+    matrix = frontier["account_balance_risk_pct_matrix"]
+    fixed = frontier["fixed_risk_budget_scenarios"]
+
+    assert frontier["hypothetical_only"] is True
+    assert frontier["not_production_settings"] is True
+    assert frontier["account_balances_tested"] == [500.0, 1000.0, 2500.0, 5000.0, 6000.0, 10000.0]
+    assert frontier["risk_percentages_tested"] == [0.25, 0.5, 1.0]
+    assert frontier["fixed_risk_budgets_tested"] == [2.5, 5.0, 10.0, 15.0, 25.0]
+    assert len(matrix) == 18
+    assert len(fixed) == 5
+
+    low_budget = scenario_by_matrix_key(matrix, account_balance=500.0, risk_pct=0.25)
+    higher_budget = scenario_by_matrix_key(matrix, account_balance=500.0, risk_pct=1.0)
+
+    assert low_budget["risk_amount"] == 1.25
+    assert low_budget["feasible_candidate_count"] == 0
+    assert low_budget["infeasible_candidate_count"] == low_budget["candidate_count"]
+    assert low_budget["median_normalized_lot"] == 0.0
+    assert low_budget["median_risk_shortfall"] > 0
+    assert low_budget["minimum_required_balance_estimate"] > 0
+    assert higher_budget["risk_amount"] == 5.0
+    assert higher_budget["feasible_candidate_count"] == higher_budget["candidate_count"]
+    assert higher_budget["median_normalized_lot"] >= frontier["broker_volume_min"]
+
+
+def test_fixed_risk_budget_frontier_keeps_scenarios_hypothetical():
+    report = run_strategy_hypothesis_lab(
+        bars=oscillating_bars(),
+        symbol="GOLD_",
+        timeframe="M15",
+        symbol_info=SYMBOL_INFO,
+        trading_config=TradingConfig(risk=RiskConfig(max_spread_points=350)),
+        hypotheses=[risk_gated_crossover("risk_gated")],
+        account_equity=10.0,
+        data_source={"kind": "unit_test"},
+    )
+
+    fixed = report["minimum_lot_feasibility_study"]["risk_budget_frontier"]["fixed_risk_budget_scenarios"]
+    by_budget = {row["fixed_risk_budget"]: row for row in fixed}
+
+    assert by_budget[2.5]["hypothetical_only"] is True
+    assert by_budget[2.5]["not_production_settings"] is True
+    assert by_budget[2.5]["scenario_type"] == "fixed_risk_budget"
+    assert by_budget[2.5]["risk_pct_for_required_balance_estimate"] == 0.25
+    assert by_budget[25.0]["feasible_candidate_count"] >= by_budget[2.5]["feasible_candidate_count"]
+    assert report["orders_sent"] == 0
+    assert report["order_check_called"] is False
+    assert report["order_send_called"] is False
+
+
 def test_trend_continuation_hypothesis_generates_candidates_without_changing_baseline():
     report = run_strategy_hypothesis_lab(
         bars=trending_bars(),
@@ -226,6 +289,18 @@ def candidate_only_crossover(name: str) -> HypothesisDefinition:
         signal_config=BaselineSignalConfig(fast_sma=2, slow_sma=3, atr_period=2),
         risk_gated=False,
     )
+
+
+def scenario_by_matrix_key(
+    rows: list[dict],
+    *,
+    account_balance: float,
+    risk_pct: float,
+) -> dict:
+    for row in rows:
+        if row["account_balance"] == account_balance and row["risk_pct"] == risk_pct:
+            return row
+    raise AssertionError(f"scenario not found for account_balance={account_balance} risk_pct={risk_pct}")
 
 
 def oscillating_bars() -> pd.DataFrame:
