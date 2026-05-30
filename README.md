@@ -265,6 +265,7 @@ python -m pytest
 python scripts\phase2_verify.py
 python scripts\check_live_sample_coverage.py --json
 python scripts\analyze_live_sample_quality.py --json
+python scripts\strategy_hypothesis_lab.py --json
 python scripts\research_pipeline_verify.py --json
 python scripts\evaluate_dry_run_observation_quality.py --json
 python scripts\compare_live_vs_historical_signal_rate.py --json
@@ -275,8 +276,9 @@ Expected safety behavior:
 - `phase2_verify.py` runs the always-safe verification contract and requires
   `orders_sent: 0` for dry-run and safety scripts.
 - `research_pipeline_verify.py` runs pytest plus the Phase 3 read-only research
-  checks. At v0.3.9 it returns `PASS` after live sample coverage reached the
-  required minimum.
+  checks. At v0.3.9 it returned `PASS` after live sample coverage reached the
+  required minimum; later research-quality checkpoints may return `WARN` for
+  zero final signal findings while safety remains clean.
 - `check_live_sample_coverage.py` reports read-only sampling progress from
   `logs/dry_run_signals/*.json`.
 - `analyze_live_sample_quality.py` reads dry-run journals and campaign metadata
@@ -284,6 +286,9 @@ Expected safety behavior:
   reasons, and historical expectation comparison. It is read-only and may
   return `WARN` for research-quality findings such as zero final `SIGNAL`
   outcomes.
+- `strategy_hypothesis_lab.py` is an offline read-only research lab for
+  comparing hypothetical SMA/candidate modes against historical/cached data.
+  Its results are not used for production trading decisions.
 - `evaluate_dry_run_observation_quality.py` and
   `compare_live_vs_historical_signal_rate.py` should keep reporting sample
   coverage details and must still block on any order execution boundary
@@ -503,6 +508,27 @@ This remains observation-only. It must not call `order_check`, must not call
   quality warning and not a safety violation.
 - This checkpoint does not change trading logic, thresholds, safety gates, order
   routing, `allow_order_send`, or AI annotation behavior.
+
+## v0.5.0 Strategy Hypothesis Lab
+
+- Release notes:
+  `docs/release_notes/v0.5.0-strategy-hypothesis-lab.md`.
+- Added `scripts\strategy_hypothesis_lab.py --json`, an offline read-only lab
+  for testing candidate-generation hypotheses against collected `GOLD_` M15
+  bars and cached symbol metadata.
+- Hypotheses include current SMA crossover, candidate-only crossover,
+  alternate SMA fast/slow pairs, trend continuation, and relaxed SMA-slope
+  diagnostics.
+- The report separates candidate signal count from final theoretical signal
+  count and surfaces minimum-lot feasibility blockers such as
+  `LOT_BELOW_VOLUME_MIN`.
+- Current lab findings suggest historical crossover candidates exist, but
+  risk-gated final theoretical signals are blocked by small-risk minimum-lot
+  feasibility; live closed-bar samples still show candidate scarcity dominated
+  by `NO_ACTIONABLE_SIGNAL`.
+- This checkpoint is offline research only. It does not change production
+  strategy behavior, thresholds, safety gates, order routing,
+  `allow_order_send`, or AI annotation behavior.
 
 ## v0.2.6 Operational Safety Guarantees
 

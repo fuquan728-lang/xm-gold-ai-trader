@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.5.0-strategy-hypothesis-lab
+
+- Added `scripts/strategy_hypothesis_lab.py --json`, a read-only offline
+  research lab for testing why the baseline produces zero final actionable live
+  dry-run signals.
+- The lab evaluates historical/cached data hypotheses without touching
+  production strategy defaults:
+  - current SMA crossover with risk feasibility gates
+  - current SMA crossover candidate-only diagnostic mode
+  - alternate SMA fast/slow pairs
+  - trend-continuation diagnostic mode
+  - relaxed SMA-slope candidate-only diagnostic mode
+- Reports candidate signal count, final theoretical signal count, signal rate,
+  BUY/SELL distribution, top block reasons, minimum-lot feasibility issues, and
+  comparison against the current baseline.
+- Added pytest coverage proving the lab remains read-only, candidate-only
+  diagnostics do not mutate production behavior, empty/missing data are handled
+  safely, and no order boundary is crossed.
+
+No trading logic, strategy thresholds, safety checks, order routing, or AI
+annotation behavior changed. No AI trading, no `order_check`, no `order_send`,
+no martingale, no grid, and no lot increase after loss.
+
 ## v0.4.6-verifier-warning-taxonomy
 
 - Added categorized warning output to `scripts/research_pipeline_verify.py`:
