@@ -27,6 +27,28 @@ REASON_SUBCHECK_WARN = "SUBCHECK_WARN"
 
 FORBIDDEN_CONTENT_REASON_CODES = {"ANNOTATION_FORBIDDEN_FIELD"}
 MISSING_ANNOTATION_REASON_CODES = {"MISSING_AI_ANNOTATION"}
+SAFETY_WARNING_CODES = {
+    REASON_ORDERS_SENT_NONZERO,
+    REASON_ORDER_CHECK_CALLED,
+    REASON_ORDER_SEND_CALLED,
+    REASON_FORBIDDEN_AI_TRADING_CONTENT,
+    REASON_MISSING_AI_ANNOTATION_AFTER_ANNOTATE,
+}
+LIVE_SAMPLE_COVERAGE_WARNING_CODES = {
+    "UNIQUE_CLOSED_BARS_BELOW_MINIMUM",
+    "INSUFFICIENT_LIVE_SAMPLE",
+}
+RESEARCH_QUALITY_WARNING_CODES = {
+    "LIVE_SIGNAL_COUNT_ZERO",
+    "MALFORMED_LIVE_JOURNALS",
+    "HISTORICAL_COMPARISON_UNAVAILABLE",
+    "TOO_MANY_MALFORMED_JOURNALS",
+}
+STRATEGY_SIGNAL_WARNING_CODES = {
+    "ZERO_ACTIONABLE_SIGNAL_RATE",
+    "LOW_LIVE_SIGNAL_RATE",
+    "HIGH_LIVE_SIGNAL_RATE",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +76,18 @@ def main() -> int:
 
 
 def run_research_pipeline() -> list[CheckResult]:
-    commands = [
+    commands = research_pipeline_commands()
+    results: list[CheckResult] = []
+    for name, command in commands:
+        if name == "pytest":
+            results.append(run_pytest(command))
+        else:
+            results.append(run_json_command(name, command))
+    return results
+
+
+def research_pipeline_commands() -> list[tuple[str, list[str]]]:
+    return [
         ("pytest", [sys.executable, "-m", "pytest"]),
         (
             "evaluate_dry_run_observation_quality",
@@ -63,6 +96,10 @@ def run_research_pipeline() -> list[CheckResult]:
         (
             "compare_live_vs_historical_signal_rate",
             [sys.executable, "scripts/compare_live_vs_historical_signal_rate.py", "--json"],
+        ),
+        (
+            "analyze_live_sample_quality",
+            [sys.executable, "scripts/analyze_live_sample_quality.py", "--json"],
         ),
         (
             "annotate_dry_run_signals",
@@ -75,13 +112,6 @@ def run_research_pipeline() -> list[CheckResult]:
             [sys.executable, "scripts/analyze_ai_annotations_vs_signals.py", "--json"],
         ),
     ]
-    results: list[CheckResult] = []
-    for name, command in commands:
-        if name == "pytest":
-            results.append(run_pytest(command))
-        else:
-            results.append(run_json_command(name, command))
-    return results
 
 
 def run_pytest(command: list[str]) -> CheckResult:
@@ -271,8 +301,11 @@ def summarize_checks(checks: list[CheckResult]) -> dict[str, Any]:
     else:
         final_decision = "PASS"
     live_sample_coverage = summarize_live_sample_coverage(checks)
-    for code in live_sample_coverage.get("warn_reason_codes") or []:
-        reason_counter[code] = reason_counter.get(code, 0) + 1
+    warning_taxonomy = categorize_warnings(checks, live_sample_coverage)
+    for category in warning_taxonomy["categories"].values():
+        for code in category["reason_codes"]:
+            if code not in reason_counter:
+                reason_counter[code] = 1
     return {
         "project": "xm-gold-ai-trader",
         "mode": MODE,
@@ -284,6 +317,11 @@ def summarize_checks(checks: list[CheckResult]) -> dict[str, Any]:
         "order_check_called": False,
         "order_send_called": False,
         "live_sample_coverage": live_sample_coverage,
+        "warning_taxonomy": warning_taxonomy,
+        "safety_warnings": warning_taxonomy["categories"]["safety_warnings"],
+        "live_sample_coverage_warnings": warning_taxonomy["categories"]["live_sample_coverage_warnings"],
+        "research_quality_warnings": warning_taxonomy["categories"]["research_quality_warnings"],
+        "strategy_signal_warnings": warning_taxonomy["categories"]["strategy_signal_warnings"],
         "checks": [
             {
                 "name": check.name,
@@ -324,7 +362,11 @@ def summarize_live_sample_coverage(checks: list[CheckResult]) -> dict[str, Any]:
             "warn_reason_codes": list(coverage.get("warn_reason_codes") or []),
         }
         sources.append(source)
-        warn_codes.extend(source["warn_reason_codes"])
+        warn_codes.extend(
+            code
+            for code in source["warn_reason_codes"]
+            if code in LIVE_SAMPLE_COVERAGE_WARNING_CODES
+        )
     current_values = [
         int(source["current_unique_closed_bars"])
         for source in sources
@@ -346,6 +388,123 @@ def summarize_live_sample_coverage(checks: list[CheckResult]) -> dict[str, Any]:
         ) if sources else None,
         "warn_reason_codes": dedupe(warn_codes),
         "sources": sources,
+    }
+
+
+def categorize_warnings(checks: list[CheckResult], live_sample_coverage: dict[str, Any]) -> dict[str, Any]:
+    details = warning_details(checks, live_sample_coverage)
+    categories = {
+        "safety_warnings": build_warning_category(
+            details=details,
+            codes=SAFETY_WARNING_CODES,
+            safety_violation=True,
+            description="Order execution, order-check, order-send, or forbidden AI trading boundary warnings.",
+        ),
+        "live_sample_coverage_warnings": build_warning_category(
+            details=details,
+            codes=LIVE_SAMPLE_COVERAGE_WARNING_CODES,
+            safety_violation=False,
+            description="Warnings about insufficient dry-run closed-bar sample coverage.",
+        ),
+        "research_quality_warnings": build_warning_category(
+            details=details,
+            codes=RESEARCH_QUALITY_WARNING_CODES,
+            safety_violation=False,
+            description="Read-only research data quality warnings that do not imply order execution.",
+        ),
+        "strategy_signal_warnings": build_warning_category(
+            details=details,
+            codes=STRATEGY_SIGNAL_WARNING_CODES,
+            safety_violation=False,
+            description="Read-only baseline strategy signal-quality warnings, not safety violations.",
+        ),
+    }
+    categorized_codes = [
+        code
+        for category in categories.values()
+        for code in category["reason_codes"]
+    ]
+    uncategorized = [
+        detail
+        for code, detail in sorted(details.items())
+        if code not in categorized_codes and code != REASON_SUBCHECK_WARN
+    ]
+    return {
+        "safety_clean": len(categories["safety_warnings"]["reason_codes"]) == 0,
+        "zero_actionable_signal_rate_is_safety_violation": False,
+        "categories": categories,
+        "uncategorized_warnings": uncategorized,
+    }
+
+
+def warning_details(checks: list[CheckResult], live_sample_coverage: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    details: dict[str, dict[str, Any]] = {}
+    for code in live_sample_coverage.get("warn_reason_codes") or []:
+        add_warning_detail(details, code, "live_sample_coverage", "live_sample_coverage.warn_reason_codes")
+    for check in checks:
+        for code in check.reason_codes:
+            add_warning_detail(details, code, check.name, "check.reason_codes")
+        if not check.payload:
+            continue
+        for code in check.payload.get("reason_codes") or []:
+            add_warning_detail(details, str(code), check.name, "payload.reason_codes")
+        for code in (check.payload.get("reason_code_counts") or {}).keys():
+            add_warning_detail(details, str(code), check.name, "payload.reason_code_counts")
+        coverage = check.payload.get("live_sample_coverage")
+        if isinstance(coverage, dict):
+            for code in coverage.get("warn_reason_codes") or []:
+                add_warning_detail(details, str(code), check.name, "payload.live_sample_coverage.warn_reason_codes")
+    return details
+
+
+def add_warning_detail(details: dict[str, dict[str, Any]], code: str, check_name: str, source: str) -> None:
+    if code == "LIVE_SIGNAL_RATE_WITHIN_EXPECTATION":
+        return
+    if source.startswith("payload") or source == "live_sample_coverage.warn_reason_codes":
+        if not is_known_warning_code(code):
+            return
+    detail = details.setdefault(
+        code,
+        {
+            "reason_code": code,
+            "checks": [],
+            "sources": [],
+        },
+    )
+    if check_name not in detail["checks"]:
+        detail["checks"].append(check_name)
+    if source not in detail["sources"]:
+        detail["sources"].append(source)
+
+
+def is_known_warning_code(code: str) -> bool:
+    return code in (
+        SAFETY_WARNING_CODES
+        | LIVE_SAMPLE_COVERAGE_WARNING_CODES
+        | RESEARCH_QUALITY_WARNING_CODES
+        | STRATEGY_SIGNAL_WARNING_CODES
+        | {REASON_SUBCHECK_WARN, REASON_COMMAND_FAILED, REASON_JSON_PARSE_FAILED, REASON_SUBCHECK_BLOCK}
+    )
+
+
+def build_warning_category(
+    *,
+    details: dict[str, dict[str, Any]],
+    codes: set[str],
+    safety_violation: bool,
+    description: str,
+) -> dict[str, Any]:
+    selected = [
+        details[code]
+        for code in sorted(codes)
+        if code in details
+    ]
+    return {
+        "reason_codes": [item["reason_code"] for item in selected],
+        "count": len(selected),
+        "safety_violation": safety_violation and bool(selected),
+        "description": description,
+        "details": selected,
     }
 
 

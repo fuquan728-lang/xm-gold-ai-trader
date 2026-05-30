@@ -264,6 +264,7 @@ Run these before any further execution work. They do not send new orders.
 python -m pytest
 python scripts\phase2_verify.py
 python scripts\check_live_sample_coverage.py --json
+python scripts\analyze_live_sample_quality.py --json
 python scripts\research_pipeline_verify.py --json
 python scripts\evaluate_dry_run_observation_quality.py --json
 python scripts\compare_live_vs_historical_signal_rate.py --json
@@ -278,6 +279,11 @@ Expected safety behavior:
   required minimum.
 - `check_live_sample_coverage.py` reports read-only sampling progress from
   `logs/dry_run_signals/*.json`.
+- `analyze_live_sample_quality.py` reads dry-run journals and campaign metadata
+  to report sample quality, final signal count, candidate signal count, block
+  reasons, and historical expectation comparison. It is read-only and may
+  return `WARN` for research-quality findings such as zero final `SIGNAL`
+  outcomes.
 - `evaluate_dry_run_observation_quality.py` and
   `compare_live_vs_historical_signal_rate.py` should keep reporting sample
   coverage details and must still block on any order execution boundary
@@ -361,6 +367,142 @@ Runbook:
 - Safety posture is unchanged: default `execution.allow_order_send: false`, no
   Phase 3 `order_check` or `order_send`, AI annotations remain read-only, and
   there is still no martingale, no grid, and no lot increase after loss.
+
+## v0.4.0 Research Quality Analysis
+
+- Release notes:
+  `docs/release_notes/v0.4.0-research-quality-analysis.md`.
+- Added `scripts\analyze_live_sample_quality.py --json` as a read-only research
+  report over `logs\dry_run_signals\*.json` and
+  `logs\dry_run_campaigns\*.json`.
+- Current findings from the v0.3.9 sample set: `109` valid journals, `101`
+  unique closed bars, `0` final `SIGNAL` outcomes, `1` candidate baseline signal
+  blocked by risk controls, and top block reasons led by
+  `NO_ACTIONABLE_SIGNAL`.
+- Historical comparison remains normal with
+  `LIVE_SIGNAL_RATE_WITHIN_EXPECTATION`.
+- The script may return `WARN` with `LIVE_SIGNAL_COUNT_ZERO`; this is a research
+  quality warning and does not change strategy behavior.
+- Safety posture is unchanged: order execution disabled by default, no Phase 3
+  `order_check` or `order_send`, and AI annotations remain read-only commentary.
+
+## v0.4.1 Block Reason Attribution
+
+- Release notes:
+  `docs/release_notes/v0.4.1-block-reason-attribution.md`.
+- `scripts\analyze_live_sample_quality.py --json` now includes block reason
+  attribution:
+  - block reason counts and percentages
+  - multi-reason combinations
+  - candidate-to-final rejection reasons
+  - per-campaign block reason distribution
+  - zero-final-signal attribution as dominant rule vs distributed filters
+- Current findings from the v0.3.9/v0.4.x live sample set: `101` unique closed
+  bars, `0` final `SIGNAL` outcomes, `1` candidate signal rejected by
+  `LOT_BELOW_VOLUME_MIN`, and `NO_ACTIONABLE_SIGNAL` as the dominant block
+  reason at about `99.01%` of blocked unique observations.
+- This remains read-only research analysis. It does not change strategy
+  thresholds, risk controls, order routing, or AI annotation behavior.
+
+## v0.4.2 Signal Candidate Forensics
+
+- Release notes:
+  `docs/release_notes/v0.4.2-signal-candidate-forensics.md`.
+- `scripts\analyze_live_sample_quality.py --json` now includes
+  `signal_candidate_forensics` with per-bar diagnostics and aggregate counts.
+- Current findings: `100` of `101` unique closed bars generated no candidate
+  because `SMA_CROSSOVER_NOT_PRESENT`; the only `BUY` candidate was rejected by
+  `LOT_BELOW_VOLUME_MIN`.
+- The rejected BUY candidate had computed lot about `0.00194`, broker
+  `volume_min` `0.01`, and normalized lot `0.0`, confirming the system did not
+  round up to minimum lot.
+- Raw fast/slow SMA values are not stored in current live journals, so the
+  report marks those fields as `not_recorded_in_journal`; ATR is reconstructed
+  from the candidate stop distance when possible.
+- This remains read-only research forensics. It does not change trading logic,
+  strategy thresholds, risk controls, order routing, or AI annotation behavior.
+
+## v0.4.3 Journal Observability Enrichment
+
+- Release notes:
+  `docs/release_notes/v0.4.3-journal-observability-enrichment.md`.
+- New live dry-run signal journals include a backward-compatible `diagnostics`
+  object with raw SMA/ATR/crossover fields and feasibility fields.
+- Recorded diagnostics include fast/slow SMA, previous fast/slow SMA, SMA
+  crossover state, ATR, stop distance, computed lot, normalized lot, broker
+  `volume_min`, broker `volume_step`, spread points, max allowed spread points,
+  failed pre-signal rule names, and failed feasibility rule names.
+- `scripts\analyze_live_sample_quality.py --json` now uses these fields when
+  present and keeps parsing older journals by marking unavailable fields as
+  `not_recorded_in_journal`.
+- This remains observation-only research plumbing. It does not change strategy
+  thresholds, risk controls, order routing, or AI annotation behavior.
+
+## v0.4.4 Enriched Live Sample Refresh
+
+- Release notes:
+  `docs/release_notes/v0.4.4-enriched-live-sample-refresh.md`.
+- `scripts\analyze_live_sample_quality.py --json` now reports mixed
+  legacy/enriched diagnostics coverage:
+  `enriched_journal_count`, `legacy_journal_count`,
+  `diagnostics_field_coverage`, `sma_field_availability`,
+  `crossover_state_availability`, and `failed_rule_field_availability`.
+- A short read-only validation sample generated one enriched journal with a
+  `diagnostics` object and `orders_sent: 0`.
+- Current mixed sample: `110` valid journals, `1` enriched journal, `109`
+  legacy journals, and `102` unique closed bars.
+
+Full bounded enriched refresh command:
+
+```powershell
+python scripts\run_dry_observation_campaign.py --symbol GOLD_ --timeframe M15 --interval-seconds 60 --max-iterations 240 --bar-close-only --json
+```
+
+This remains observation-only. It must not call `order_check`, must not call
+`order_send`, and must keep `orders_sent: 0`.
+
+## v0.4.5 Enriched Diagnostics Sample Expansion
+
+- Release notes:
+  `docs/release_notes/v0.4.5-enriched-diagnostics-sample-expansion.md`.
+- Current expanded read-only sample: `129` total valid journals and `121`
+  unique closed bars.
+- Enriched SMA diagnostic recorded count is `20`; `fast_sma`, `slow_sma`,
+  `previous_fast_sma`, and `previous_slow_sma` each have recorded count `20`.
+- Top failed pre-signal condition: `SMA_CROSSOVER_NOT_PRESENT: 120`.
+- Top block reasons: `NO_ACTIONABLE_SIGNAL: 120` and
+  `LOT_BELOW_VOLUME_MIN: 1`.
+- `signal_count` remains `0`; zero final signal attribution remains
+  `DOMINANT_RULE`, dominated by `NO_ACTIONABLE_SIGNAL`.
+- `actionable_signal_rate` in observation quality and live-vs-historical
+  comparison now counts only final `SIGNAL` outcomes. Candidate BUY/SELL signals
+  blocked by risk or feasibility gates are reported separately as candidate
+  signals.
+- `scripts\research_pipeline_verify.py --json` includes
+  `scripts\analyze_live_sample_quality.py --json`, so live quality WARNs such as
+  `ZERO_ACTIONABLE_SIGNAL_RATE` and `LIVE_SIGNAL_COUNT_ZERO` remain visible.
+- This is reporting and observability only. It does not change strategy
+  behavior, safety gates, order routing, `allow_order_send`, or AI annotation
+  behavior.
+
+## v0.4.6 Verifier Warning Taxonomy
+
+- Release notes:
+  `docs/release_notes/v0.4.6-verifier-warning-taxonomy.md`.
+- `scripts\research_pipeline_verify.py --json` now separates WARN reasons into:
+  `safety_warnings`, `live_sample_coverage_warnings`,
+  `research_quality_warnings`, and `strategy_signal_warnings`.
+- Current verifier status is `WARN` because final signal count is still zero,
+  not because of a safety violation.
+- Current classification:
+  - `safety_warnings`: none
+  - `live_sample_coverage_warnings`: none; coverage is `121 / 100`
+  - `research_quality_warnings`: `LIVE_SIGNAL_COUNT_ZERO`
+  - `strategy_signal_warnings`: `ZERO_ACTIONABLE_SIGNAL_RATE`
+- `ZERO_ACTIONABLE_SIGNAL_RATE` is explicitly a read-only strategy signal
+  quality warning and not a safety violation.
+- This checkpoint does not change trading logic, thresholds, safety gates, order
+  routing, `allow_order_send`, or AI annotation behavior.
 
 ## v0.2.6 Operational Safety Guarantees
 
