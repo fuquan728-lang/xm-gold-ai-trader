@@ -425,6 +425,7 @@ def test_forward_sample_collection_plan_exists_and_defines_tracking_fields():
         hypotheses=[risk_gated_crossover("risk_gated")],
         account_equity=10.0,
         data_source={"kind": "unit_test"},
+        journal_glob="tests/data/nonexistent_forward_window/*.json",
     )
 
     plan = report["forward_sample_collection_plan"]
@@ -434,6 +435,13 @@ def test_forward_sample_collection_plan_exists_and_defines_tracking_fields():
     assert plan["production_strategy_change_recommended"] is False
     assert plan["live_order_enablement_recommended"] is False
     assert plan["ai_trading_behavior_introduced"] is False
+
+    # Forward window metadata
+    window = plan["window"]
+    assert window["total_enriched_journals"] == 0
+    assert window["legacy_journals_excluded"] >= 0
+    assert "note" in window
+    assert "forward evidence window" in window["note"].lower()
 
     progress = plan["progress"]
     bars = progress["enriched_closed_bars"]

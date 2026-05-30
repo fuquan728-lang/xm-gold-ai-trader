@@ -652,11 +652,31 @@ This remains observation-only. It must not call `order_check`, must not call
 - Defined what passing all gates unlocks (v0.6 offline parameter-candidate
   research) and what remains blocked (production strategy changes, live order
   enablement).
-- Current progress: `0 / 500` enriched closed bars, `0 / 5` final SIGNALs,
-  `0%` diagnostics coverage, all gates unmet.
+- Current progress: `19 / 500` enriched closed bars, `0 / 5` final SIGNALs,
+  `100%` diagnostics coverage (forward window only, 109 legacy excluded).
 - This checkpoint is planning only. It does not change production strategy
   behavior, risk settings, safety gates, order routing, `allow_order_send`, or
   AI annotation behavior.
+
+## v0.5.7 Forward Window Metrics Fix
+
+- Release notes:
+  `docs/release_notes/v0.5.7-forward-window-metrics-fix.md`.
+- Fixed diagnostics coverage denominator: only counts enriched journals
+  (schema_version >= 1), excludes 109 legacy pre-enrichment journals.
+- Added `_collect_forward_window_stats()` to read only enriched journals
+  and compute real forward window metrics: enriched journal count, legacy
+  exclusion count, closed bars, final SIGNAL count, coverage, and top blocks.
+- Forward window metrics are now live from `logs/dry_run_signals/*.json`
+  instead of hardcoded zeros.
+- Current forward window: `21` enriched journals, `19` unique closed bars,
+  `0` final SIGNALs, `100%` diagnostics coverage, `SMA_CROSSOVER_NOT_PRESENT`
+  dominant block reason, gates not met.
+- Updated `run_strategy_hypothesis_lab()` with optional `journal_glob` for
+  test isolation.
+- This is a read-only metrics calculation fix. It does not change production
+  strategy behavior, risk settings, safety gates, order routing,
+  `allow_order_send`, or AI annotation behavior.
 
 ## v0.2.6 Operational Safety Guarantees
 

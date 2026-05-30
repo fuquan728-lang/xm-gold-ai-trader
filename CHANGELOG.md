@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.5.7-forward-window-metrics-fix
+
+- Added `_collect_forward_window_stats()` helper that reads enriched journals
+  only (schema_version >= 1) from `logs/dry_run_signals/*.json`.
+- Fixed `forward_sample_collection_plan` diagnostics coverage denominator:
+  only counts enriched journals, excludes 109 legacy pre-enrichment journals
+  that lack a `diagnostics` object.
+- Forward window metrics now correctly report: enriched journal count, legacy
+  journals excluded, unique enriched closed bars, final SIGNAL count, diagnostics
+  coverage within the forward window, and top block reasons.
+- Updated `run_strategy_hypothesis_lab()` to accept optional `journal_glob`
+  parameter for test isolation.
+- Current state: 21 enriched journals, 19 closed bars, 0 SIGNALs, 100%
+  coverage, gates not met (bars 19/500, signals 0/5).
+
+No trading logic, strategy thresholds, risk settings, safety checks, order
+routing, or AI annotation behavior changed. No AI trading, no `order_check`, no
+`order_send`, no martingale, no grid, and no lot increase after loss.
+
 ## v0.5.6-forward-sample-collection-plan
 
 - Extended `scripts/strategy_hypothesis_lab.py --json` with top-level

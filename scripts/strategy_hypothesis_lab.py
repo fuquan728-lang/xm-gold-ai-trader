@@ -134,6 +134,7 @@ def run_strategy_hypothesis_lab(
     account_equity: float = 1_000.0,
     selected_parameters_source: str = "provided",
     data_source: Mapping[str, Any] | None = None,
+    journal_glob: str | None = None,
 ) -> dict[str, Any]:
     config = trading_config or TradingConfig()
     report: dict[str, Any] = {
@@ -215,7 +216,9 @@ def run_strategy_hypothesis_lab(
         current_baseline=current_baseline,
     )
     report["forward_evidence_plan"] = forward_evidence_plan()
-    report["forward_sample_collection_plan"] = forward_sample_collection_plan()
+    report["forward_sample_collection_plan"] = forward_sample_collection_plan(
+        **_collect_forward_window_stats(journal_glob or "logs/dry_run_signals/*.json")
+    )
     report["summary"] = {
         "hypothesis_count": len(rows),
         "best_by_final_theoretical_signal_count": compact_hypothesis_summary(
@@ -1071,18 +1074,90 @@ def forward_evidence_plan() -> dict[str, Any]:
     }
 
 
+def _collect_forward_window_stats(journal_glob: str = "logs/dry_run_signals/*.json") -> dict[str, Any]:
+    """Read enriched journals only. Legacy pre-enrichment journals are excluded from the denominator.
+
+    Forward evidence window = journals that carry a ``diagnostics`` object (schema_version >= 1).
+    Diagnostics coverage = enriched journals with complete diag fields / total enriched journals.
+    """
+    import glob as _glob
+
+    journal_paths = sorted(_glob.glob(str(ROOT / journal_glob)))
+    enriched_journals: list[dict[str, Any]] = []
+    for jp in journal_paths:
+        try:
+            with open(jp, encoding="utf-8") as fh:
+                d = json.load(fh)
+        except Exception:
+            continue
+        if d.get("diagnostics"):
+            enriched_journals.append(d)
+
+    total_enriched = len(enriched_journals)
+    if total_enriched == 0:
+        return {
+            "total_enriched_journals": 0,
+            "legacy_journals_excluded": len(journal_paths),
+            "enriched_closed_bar_count": 0,
+            "final_signal_count": 0,
+            "diagnostics_coverage_pct": 0.0,
+            "top_block_reasons": [],
+            "window_note": "forward evidence window = journals with diagnostics present (schema_version >= 1)",
+        }
+
+    unique_closed_bars: set[str] = set()
+    final_signal_count = 0
+    complete_diag_count = 0
+    block_reasons: Counter[str] = Counter()
+
+    required_diag_keys = {"signal", "feasibility", "failed_pre_signal_rule_names", "failed_feasibility_rule_names"}
+    for d in enriched_journals:
+        cbt = d.get("latest_closed_bar_time", "")
+        if cbt:
+            unique_closed_bars.add(str(cbt))
+        action = str(d.get("action", "")).upper()
+        if action in ("BUY", "SELL"):
+            final_signal_count += 1
+        diag = d.get("diagnostics", {})
+        if isinstance(diag, dict) and required_diag_keys.issubset(diag.keys()):
+            complete_diag_count += 1
+        for reason in diag.get("failed_pre_signal_rule_names", []) or []:
+            block_reasons[str(reason)] += 1
+        for reason in diag.get("failed_feasibility_rule_names", []) or []:
+            block_reasons[str(reason)] += 1
+
+    coverage_pct = (complete_diag_count / total_enriched * 100) if total_enriched > 0 else 0.0
+    top_blocks = [{"reason": r, "count": c} for r, c in block_reasons.most_common(5)]
+
+    return {
+        "total_enriched_journals": total_enriched,
+        "legacy_journals_excluded": len(journal_paths) - total_enriched,
+        "enriched_closed_bar_count": len(unique_closed_bars),
+        "final_signal_count": final_signal_count,
+        "diagnostics_coverage_pct": round(coverage_pct, 2),
+        "top_block_reasons": top_blocks,
+        "window_note": "forward evidence window = journals with diagnostics present (schema_version >= 1); legacy pre-enrichment journals excluded from coverage denominator",
+    }
+
+
 def forward_sample_collection_plan(
     *,
     enriched_closed_bar_count: int = 0,
     final_signal_count: int = 0,
     diagnostics_coverage_pct: float = 0.0,
+    total_enriched_journals: int = 0,
+    legacy_journals_excluded: int = 0,
+    top_block_reasons: list[dict[str, Any]] | None = None,
+    window_note: str = "",
 ) -> dict[str, Any]:
     required_bars = 500
     required_signals = 5
     required_coverage = 0.95
     bars_met = enriched_closed_bar_count >= required_bars
     signals_met = final_signal_count >= required_signals
-    coverage_met = diagnostics_coverage_pct >= required_coverage
+    # Coverage is calculated within the forward window only (enriched journals as denominator).
+    # Legacy pre-enrichment journals are never counted toward the denominator.
+    coverage_met = diagnostics_coverage_pct >= (required_coverage * 100)
     gates_met = bars_met and signals_met and coverage_met
 
     return {
@@ -1093,6 +1168,12 @@ def forward_sample_collection_plan(
         "live_order_enablement_recommended": False,
         "ai_trading_behavior_introduced": False,
         "forward_evidence_gates_met": gates_met,
+        "window": {
+            "total_enriched_journals": total_enriched_journals,
+            "legacy_journals_excluded": legacy_journals_excluded,
+            "top_block_reasons": top_block_reasons or [],
+            "note": window_note or "forward evidence window = enriched journals only; legacy pre-enrichment journals excluded from coverage denominator",
+        },
         "progress": {
             "enriched_closed_bars": {
                 "current": enriched_closed_bar_count,
@@ -1107,7 +1188,7 @@ def forward_sample_collection_plan(
                 "met": signals_met,
             },
             "diagnostics_coverage": {
-                "current_pct": round(diagnostics_coverage_pct * 100, 2),
+                "current_pct": diagnostics_coverage_pct,
                 "required_pct": round(required_coverage * 100, 2),
                 "met": coverage_met,
             },
