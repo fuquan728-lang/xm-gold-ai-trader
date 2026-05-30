@@ -678,6 +678,27 @@ This remains observation-only. It must not call `order_check`, must not call
   strategy behavior, risk settings, safety gates, order routing,
   `allow_order_send`, or AI annotation behavior.
 
+## v0.5.8 Repository Hygiene Cleanup
+
+- Release notes:
+  `docs/release_notes/v0.5.8-repository-hygiene-cleanup.md`.
+- Low-risk repository hygiene checkpoint. Moved 17 stale/broken legacy
+  files to archive directories. No active code or production behavior changed.
+- Moved 8 root-level markdown files (stale Chinese reports + obsolete tech
+  docs) to `docs/archive/obsolete/`.
+- Moved 6 `docs/05-技术报告/` files referencing deleted modules
+  (`ai_file_server.py`, `ai_engine_enhanced.py`, `mql5_finance_data.py`)
+  to archive.
+- Created `docs/MQL5_EA_VERSION_INVENTORY.md` documenting active/legacy EA
+  versions. No EA files deleted.
+- Created `docs/backlog/repository_integration_candidates.md` listing 6
+  integration candidates for future review.
+- Created `legacy_v4/tests/README.md` documenting 14 legacy tests including
+  1 broken test.
+- Moved `run_test_capture.py` and `remove_emoji.py` (broken path references)
+  to `archive/obsolete_tools/`.
+- No strategy, risk, safety, order routing, or AI annotation changes.
+
 ## v0.2.6 Operational Safety Guarantees
 
 - Default `configs/xm_gold_ai_trader.demo.yaml` has

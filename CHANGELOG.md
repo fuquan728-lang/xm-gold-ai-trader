@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.5.8-repository-hygiene-cleanup
+
+- Moved 2 stale root markdown files + 6 obsolete tech reports to
+  `docs/archive/obsolete/` (all referenced deleted files: `ai_file_server.py`,
+  `ai_engine_enhanced.py`, `mql5_finance_data.py`).
+- Moved 5 historical Chinese reports to `docs/archive/obsolete/`.
+- Created `docs/archive/obsolete/README.md` inventory.
+- Moved `run_test_capture.py` and `remove_emoji.py` to `archive/obsolete_tools/`
+  (broken path references).
+- Created `legacy_v4/tests/README.md` documenting 14 legacy tests, including
+  1 broken test (`test_validation.py` imports deleted module).
+- Created `docs/MQL5_EA_VERSION_INVENTORY.md` documenting all EA versions:
+  active, legacy, and archive candidates. No EA files deleted.
+- Created `docs/backlog/repository_integration_candidates.md` listing 6
+  integration candidates for future review. No merges performed.
+- Confirmed `pytest.ini` already excludes `legacy_v4` from default test suite.
+
+No trading logic, strategy thresholds, risk settings, safety checks, order
+routing, or AI annotation behavior changed. All moved files are documentation
+or broken scripts — no active code affected. No AI trading, no `order_check`,
+no `order_send`.
+
 ## v0.5.7-forward-window-metrics-fix
 
 - Added `_collect_forward_window_stats()` helper that reads enriched journals
