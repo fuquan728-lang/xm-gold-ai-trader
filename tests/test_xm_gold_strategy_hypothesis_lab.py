@@ -78,6 +78,70 @@ def test_candidate_only_diagnostic_does_not_apply_risk_gate_to_final_count():
     assert candidate_only["estimated_min_lot_feasibility_issues"] == risk_gated["estimated_min_lot_feasibility_issues"]
 
 
+def test_minimum_lot_feasibility_study_reports_distributions_and_required_budget():
+    report = run_strategy_hypothesis_lab(
+        bars=oscillating_bars(),
+        symbol="GOLD_",
+        timeframe="M15",
+        symbol_info=SYMBOL_INFO,
+        trading_config=TradingConfig(risk=RiskConfig(max_spread_points=350)),
+        hypotheses=[risk_gated_crossover("risk_gated")],
+        account_equity=10.0,
+        data_source={"kind": "unit_test"},
+    )
+
+    row = report["hypotheses"][0]
+    study = row["minimum_lot_feasibility"]
+
+    assert report["minimum_lot_feasibility_study"] == study
+    assert study["hypothetical_only"] is True
+    assert study["not_production_settings"] is True
+    assert study["candidate_count"] == row["candidate_signal_count"]
+    assert study["volume_min"] == 0.01
+    assert study["volume_step"] == 0.01
+    assert study["lot_below_volume_min_count"] == row["candidate_signal_count"]
+    assert study["computed_lot_distribution"]["count"] == row["candidate_signal_count"]
+    assert study["computed_lot_distribution"]["max"] < study["volume_min"]
+    assert study["normalized_lot_distribution"]["max"] == 0.0
+    assert study["risk_per_lot_distribution"]["min"] > 0
+    assert study["stop_distance_points_distribution"]["min"] > 0
+    assert study["atr_price_distribution"]["min"] > 0
+    assert study["risk_shortfall_to_min_lot_distribution"]["min"] > 0
+    assert study["account_balance_required_at_current_risk_pct_distribution"]["min"] > 10.0
+    assert study["risk_pct_required_at_account_equity_distribution"]["min"] > 0.25
+
+    scenarios = {scenario["name"]: scenario for scenario in study["hypothetical_risk_budget_scenarios"]}
+    assert scenarios["current_config"]["feasible_candidate_count"] == 0
+    assert scenarios["all_candidates_requirement"]["feasible_candidate_count"] == row["candidate_signal_count"]
+
+
+def test_minimum_lot_feasibility_scenarios_can_be_feasible_without_order_paths():
+    report = run_strategy_hypothesis_lab(
+        bars=oscillating_bars(),
+        symbol="GOLD_",
+        timeframe="M15",
+        symbol_info=SYMBOL_INFO,
+        trading_config=TradingConfig(risk=RiskConfig(max_spread_points=350)),
+        hypotheses=[risk_gated_crossover("risk_gated")],
+        account_equity=100_000.0,
+        data_source={"kind": "unit_test"},
+    )
+
+    row = report["hypotheses"][0]
+    study = row["minimum_lot_feasibility"]
+    scenarios = {scenario["name"]: scenario for scenario in study["hypothetical_risk_budget_scenarios"]}
+
+    assert row["candidate_signal_count"] > 0
+    assert row["final_theoretical_signal_count"] == row["candidate_signal_count"]
+    assert study["lot_below_volume_min_count"] == 0
+    assert study["normalized_lot_distribution"]["max"] >= study["volume_min"]
+    assert scenarios["current_config"]["hypothetical_only"] is True
+    assert scenarios["current_config"]["feasible_candidate_count"] == row["candidate_signal_count"]
+    assert report["orders_sent"] == 0
+    assert report["order_check_called"] is False
+    assert report["order_send_called"] is False
+
+
 def test_trend_continuation_hypothesis_generates_candidates_without_changing_baseline():
     report = run_strategy_hypothesis_lab(
         bars=trending_bars(),

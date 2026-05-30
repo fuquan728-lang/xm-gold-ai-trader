@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from collections import Counter
@@ -27,6 +28,7 @@ from src.strategy.risk_manager import (
     RiskManager,
     SymbolSpec,
     TradeRiskRequest,
+    floor_volume_to_step,
 )
 
 
@@ -198,6 +200,10 @@ def run_strategy_hypothesis_lab(
     ]
     report["hypotheses"] = rows
     report["comparison_against_current_baseline"] = compare_against_baseline(rows)
+    current_baseline = rows[0] if rows else None
+    report["minimum_lot_feasibility_study"] = (
+        current_baseline.get("minimum_lot_feasibility") if current_baseline is not None else None
+    )
     report["summary"] = {
         "hypothesis_count": len(rows),
         "best_by_final_theoretical_signal_count": compact_hypothesis_summary(
@@ -214,7 +220,7 @@ def run_strategy_hypothesis_lab(
                 default=None,
             )
         ),
-        "current_baseline": compact_hypothesis_summary(rows[0] if rows else None),
+        "current_baseline": compact_hypothesis_summary(current_baseline),
     }
     return report
 
@@ -238,6 +244,7 @@ def evaluate_hypothesis(
     feasibility_counter: Counter[str] = Counter()
     lot_below_min_count = 0
     risk_preview_examples: list[dict[str, Any]] = []
+    feasibility_records: list[dict[str, Any]] = []
 
     for entry_index in range(minimum_bars, len(frame)):
         observations += 1
@@ -263,8 +270,17 @@ def evaluate_hypothesis(
         if REASON_LOT_BELOW_VOLUME_MIN in risk_decision.reason_codes:
             lot_below_min_count += 1
         feasibility_counter.update(risk_decision.reason_codes)
+        feasibility_record = risk_preview_payload(
+            candidate,
+            risk_decision,
+            symbol_info=symbol_info,
+            risk_config=risk_config,
+            signal_config=hypothesis.signal_config,
+            account_equity=account_equity,
+        )
+        feasibility_records.append(feasibility_record)
         if len(risk_preview_examples) < 5:
-            risk_preview_examples.append(risk_preview_payload(candidate, risk_decision))
+            risk_preview_examples.append(feasibility_record)
 
         if hypothesis.risk_gated and not risk_decision.allowed:
             reason_counter.update(risk_decision.reason_codes)
@@ -298,6 +314,12 @@ def evaluate_hypothesis(
         "block_reason_counts": dict(sorted(reason_counter.items())),
         "estimated_min_lot_feasibility_issues": lot_below_min_count,
         "estimated_feasibility_reason_counts": dict(sorted(feasibility_counter.items())),
+        "minimum_lot_feasibility": minimum_lot_feasibility_summary(
+            records=feasibility_records,
+            symbol_info=symbol_info,
+            risk_config=risk_config,
+            account_equity=account_equity,
+        ),
         "risk_preview_examples": risk_preview_examples,
         "orders_sent": 0,
         "order_check_called": False,
@@ -422,20 +444,226 @@ def assess_candidate(
     )
 
 
-def risk_preview_payload(candidate: Candidate, decision: RiskDecision) -> dict[str, Any]:
+def risk_preview_payload(
+    candidate: Candidate,
+    decision: RiskDecision,
+    *,
+    symbol_info: Mapping[str, Any],
+    risk_config: RiskConfig,
+    signal_config: BaselineSignalConfig,
+    account_equity: float,
+) -> dict[str, Any]:
+    spec = SymbolSpec.from_mt5(symbol_info)
     computed_lot = decision.risk_amount / decision.risk_per_lot if decision.risk_per_lot > 0 else None
+    normalized_lot = (
+        floor_volume_to_step(computed_lot, spec.volume_min, spec.volume_max, spec.volume_step)
+        if computed_lot is not None
+        else 0.0
+    )
+    minimum_lot_risk_amount = decision.risk_per_lot * spec.volume_min if decision.risk_per_lot > 0 else None
+    risk_shortfall = (
+        max(0.0, minimum_lot_risk_amount - decision.risk_amount)
+        if minimum_lot_risk_amount is not None
+        else None
+    )
+    risk_fraction = risk_config.risk_per_trade_pct / 100.0
+    balance_required = (
+        minimum_lot_risk_amount / risk_fraction
+        if minimum_lot_risk_amount is not None and risk_fraction > 0
+        else None
+    )
+    risk_pct_required = (
+        (minimum_lot_risk_amount / account_equity) * 100.0
+        if minimum_lot_risk_amount is not None and account_equity > 0
+        else None
+    )
+    stop_distance_price = candidate.stop_distance_points * spec.point
+    atr_price = (
+        stop_distance_price / signal_config.atr_stop_multiplier
+        if signal_config.atr_stop_multiplier > 0
+        else None
+    )
+    atr_points = (
+        candidate.stop_distance_points / signal_config.atr_stop_multiplier
+        if signal_config.atr_stop_multiplier > 0
+        else None
+    )
     return {
         "side": candidate.side,
         "signal_time": candidate.signal_time,
         "entry_bar_index": candidate.entry_bar_index,
         "stop_distance_points": candidate.stop_distance_points,
+        "stop_distance_price": stop_distance_price,
+        "atr_points": atr_points,
+        "atr_price": atr_price,
         "allowed": decision.allowed,
         "volume": decision.volume,
         "computed_lot": computed_lot,
+        "normalized_lot": normalized_lot,
+        "volume_min": spec.volume_min,
+        "volume_step": spec.volume_step,
+        "volume_max": spec.volume_max,
         "risk_amount": decision.risk_amount,
         "risk_per_lot": decision.risk_per_lot,
+        "minimum_lot_risk_amount": minimum_lot_risk_amount,
+        "risk_shortfall_to_min_lot": risk_shortfall,
+        "account_balance_required_for_min_lot_at_current_risk_pct": balance_required,
+        "risk_pct_required_for_min_lot_at_account_equity": risk_pct_required,
         "reason_codes": list(decision.reason_codes),
     }
+
+
+def minimum_lot_feasibility_summary(
+    *,
+    records: list[dict[str, Any]],
+    symbol_info: Mapping[str, Any],
+    risk_config: RiskConfig,
+    account_equity: float,
+) -> dict[str, Any]:
+    spec = SymbolSpec.from_mt5(symbol_info)
+    minimum_lot_requirements = numeric_values(records, "minimum_lot_risk_amount")
+    current_risk_amount = account_equity * (risk_config.risk_per_trade_pct / 100.0) if account_equity > 0 else 0.0
+    scenarios = feasibility_scenarios(
+        required_risk_amounts=minimum_lot_requirements,
+        current_risk_amount=current_risk_amount,
+        account_equity=account_equity,
+        risk_per_trade_pct=risk_config.risk_per_trade_pct,
+    )
+    return {
+        "hypothetical_only": True,
+        "not_production_settings": True,
+        "candidate_count": len(records),
+        "volume_min": spec.volume_min,
+        "volume_step": spec.volume_step,
+        "volume_max": spec.volume_max,
+        "current_account_equity_assumption": account_equity,
+        "current_risk_per_trade_pct": risk_config.risk_per_trade_pct,
+        "current_account_risk_amount": current_risk_amount,
+        "lot_below_volume_min_count": sum(
+            1 for record in records if REASON_LOT_BELOW_VOLUME_MIN in record.get("reason_codes", [])
+        ),
+        "computed_lot_distribution": distribution(numeric_values(records, "computed_lot")),
+        "normalized_lot_distribution": distribution(numeric_values(records, "normalized_lot")),
+        "risk_per_lot_distribution": distribution(numeric_values(records, "risk_per_lot")),
+        "stop_distance_points_distribution": distribution(numeric_values(records, "stop_distance_points")),
+        "stop_distance_price_distribution": distribution(numeric_values(records, "stop_distance_price")),
+        "atr_points_distribution": distribution(numeric_values(records, "atr_points")),
+        "atr_price_distribution": distribution(numeric_values(records, "atr_price")),
+        "minimum_lot_risk_amount_distribution": distribution(minimum_lot_requirements),
+        "account_balance_required_at_current_risk_pct_distribution": distribution(
+            numeric_values(records, "account_balance_required_for_min_lot_at_current_risk_pct")
+        ),
+        "risk_pct_required_at_account_equity_distribution": distribution(
+            numeric_values(records, "risk_pct_required_for_min_lot_at_account_equity")
+        ),
+        "risk_shortfall_to_min_lot_distribution": distribution(
+            numeric_values(records, "risk_shortfall_to_min_lot")
+        ),
+        "hypothetical_risk_budget_scenarios": scenarios,
+    }
+
+
+def feasibility_scenarios(
+    *,
+    required_risk_amounts: list[float],
+    current_risk_amount: float,
+    account_equity: float,
+    risk_per_trade_pct: float,
+) -> list[dict[str, Any]]:
+    candidate_count = len(required_risk_amounts)
+    scenario_inputs: list[tuple[str, float]] = [
+        ("current_config", current_risk_amount),
+        ("current_risk_amount_x2", current_risk_amount * 2.0),
+        ("current_risk_amount_x5", current_risk_amount * 5.0),
+        ("current_risk_amount_x10", current_risk_amount * 10.0),
+    ]
+    if required_risk_amounts:
+        sorted_required = sorted(required_risk_amounts)
+        scenario_inputs.extend(
+            [
+                ("minimum_candidate_requirement", sorted_required[0]),
+                ("median_candidate_requirement", percentile(sorted_required, 0.5)),
+                ("all_candidates_requirement", sorted_required[-1]),
+            ]
+        )
+
+    scenarios: list[dict[str, Any]] = []
+    seen: set[tuple[str, float]] = set()
+    risk_fraction = risk_per_trade_pct / 100.0
+    for name, risk_amount in scenario_inputs:
+        key = (name, round(risk_amount, 10))
+        if key in seen:
+            continue
+        seen.add(key)
+        feasible_count = sum(1 for required in required_risk_amounts if required <= risk_amount + 1e-12)
+        scenarios.append(
+            {
+                "name": name,
+                "hypothetical_only": True,
+                "risk_amount": risk_amount,
+                "account_balance_required_at_current_risk_pct": risk_amount / risk_fraction
+                if risk_fraction > 0
+                else None,
+                "risk_pct_required_at_account_equity": (risk_amount / account_equity) * 100.0
+                if account_equity > 0
+                else None,
+                "feasible_candidate_count": feasible_count,
+                "feasible_candidate_pct": feasible_count / candidate_count if candidate_count else 0.0,
+            }
+        )
+    return scenarios
+
+
+def numeric_values(records: list[dict[str, Any]], key: str) -> list[float]:
+    values: list[float] = []
+    for record in records:
+        value = record.get(key)
+        if isinstance(value, bool) or value is None:
+            continue
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(numeric_value):
+            values.append(numeric_value)
+    return values
+
+
+def distribution(values: list[float]) -> dict[str, Any]:
+    if not values:
+        return {
+            "count": 0,
+            "min": None,
+            "p25": None,
+            "median": None,
+            "p75": None,
+            "max": None,
+            "mean": None,
+        }
+    ordered = sorted(values)
+    return {
+        "count": len(ordered),
+        "min": ordered[0],
+        "p25": percentile(ordered, 0.25),
+        "median": percentile(ordered, 0.5),
+        "p75": percentile(ordered, 0.75),
+        "max": ordered[-1],
+        "mean": sum(ordered) / len(ordered),
+    }
+
+
+def percentile(ordered_values: list[float], fraction: float) -> float:
+    if not ordered_values:
+        raise ValueError("ordered_values must not be empty")
+    if len(ordered_values) == 1:
+        return ordered_values[0]
+    position = (len(ordered_values) - 1) * fraction
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered_values[int(position)]
+    weight = position - lower
+    return ordered_values[lower] * (1.0 - weight) + ordered_values[upper] * weight
 
 
 def build_hypotheses(selected_config: BaselineSignalConfig) -> list[HypothesisDefinition]:
@@ -588,6 +816,14 @@ def compare_against_baseline(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
 def compact_hypothesis_summary(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if row is None:
         return None
+    minimum_lot = row.get("minimum_lot_feasibility", {})
+    if not isinstance(minimum_lot, Mapping):
+        minimum_lot = {}
+    computed_lot_distribution = minimum_lot.get("computed_lot_distribution", {})
+    required_balance_distribution = minimum_lot.get(
+        "account_balance_required_at_current_risk_pct_distribution",
+        {},
+    )
     return {
         "name": row["name"],
         "family": row["family"],
@@ -597,6 +833,13 @@ def compact_hypothesis_summary(row: Mapping[str, Any] | None) -> dict[str, Any] 
         "signal_rate": row["signal_rate"],
         "candidate_signal_rate": row["candidate_signal_rate"],
         "estimated_min_lot_feasibility_issues": row["estimated_min_lot_feasibility_issues"],
+        "lot_below_volume_min_count": minimum_lot.get("lot_below_volume_min_count"),
+        "computed_lot_median": computed_lot_distribution.get("median")
+        if isinstance(computed_lot_distribution, Mapping)
+        else None,
+        "account_balance_required_at_current_risk_pct_median": required_balance_distribution.get("median")
+        if isinstance(required_balance_distribution, Mapping)
+        else None,
         "top_block_reasons": row["top_block_reasons"],
     }
 

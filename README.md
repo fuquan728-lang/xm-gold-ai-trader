@@ -530,6 +530,24 @@ This remains observation-only. It must not call `order_check`, must not call
   strategy behavior, thresholds, safety gates, order routing,
   `allow_order_send`, or AI annotation behavior.
 
+## v0.5.1 Minimum-Lot Feasibility Study
+
+- Release notes:
+  `docs/release_notes/v0.5.1-minimum-lot-feasibility-study.md`.
+- Extended `scripts\strategy_hypothesis_lab.py --json` with
+  `minimum_lot_feasibility` diagnostics for `LOT_BELOW_VOLUME_MIN`.
+- The report now includes computed lot, normalized lot, risk-per-lot,
+  stop-distance, ATR, risk-shortfall, required account-risk amount, required
+  account balance, required risk percentage, and hypothetical risk-budget
+  scenario distributions.
+- Current baseline finding: all `157` historical crossover candidates are below
+  broker `volume_min: 0.01` at the current offline risk assumption; computed lot
+  median is about `0.00168`.
+- Hypothetical scenarios are explicitly labeled as research only and are not
+  production settings.
+- This checkpoint does not change production strategy behavior, risk settings,
+  safety gates, order routing, `allow_order_send`, or AI annotation behavior.
+
 ## v0.2.6 Operational Safety Guarantees
 
 - Default `configs/xm_gold_ai_trader.demo.yaml` has

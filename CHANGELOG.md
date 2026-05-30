@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.5.1-minimum-lot-feasibility-study
+
+- Extended `scripts/strategy_hypothesis_lab.py --json` with a read-only
+  minimum-lot feasibility study for `LOT_BELOW_VOLUME_MIN`.
+- Added per-hypothesis and current-baseline diagnostics for:
+  - computed lot distribution
+  - normalized lot distribution
+  - risk-per-lot distribution
+  - stop-distance and ATR distributions
+  - broker `volume_min`, `volume_step`, and `volume_max`
+  - risk shortfall to broker minimum lot
+  - account risk amount required for minimum lot
+  - account balance required at the current risk percentage
+  - risk percentage required at the current account-equity assumption
+  - hypothetical risk-budget scenario feasibility counts
+- Documented current baseline findings: all `157` historical crossover
+  candidates remain below broker minimum volume at the current offline risk
+  assumption; computed lot median is about `0.00168` versus broker
+  `volume_min: 0.01`.
+- Added pytest coverage proving the study remains read-only and that
+  hypothetical feasibility scenarios do not alter order boundaries or
+  production behavior.
+
+No trading logic, strategy thresholds, risk settings, safety checks, order
+routing, or AI annotation behavior changed. No AI trading, no `order_check`, no
+`order_send`, no martingale, no grid, and no lot increase after loss.
+
 ## v0.5.0-strategy-hypothesis-lab
 
 - Added `scripts/strategy_hypothesis_lab.py --json`, a read-only offline
