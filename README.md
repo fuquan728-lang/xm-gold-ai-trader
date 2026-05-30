@@ -612,6 +612,29 @@ This remains observation-only. It must not call `order_check`, must not call
   strategy behavior, risk settings, safety gates, order routing,
   `allow_order_send`, or AI annotation behavior.
 
+## v0.5.5 Forward Evidence Plan
+
+- Release notes:
+  `docs/release_notes/v0.5.5-forward-evidence-plan.md`.
+- Extended `scripts\strategy_hypothesis_lab.py --json` with
+  `forward_evidence_plan`.
+- v0.6 parameter-candidate research is gated on at least `500` enriched
+  closed-bar dry-run observations, at least `5` final dry-run `SIGNAL`
+  observations, and at least `95%` diagnostics coverage.
+- The plan requires a chronological train/test out-of-sample split with no
+  parameter selection on the test split.
+- Risk feasibility must be reported under realistic account/risk assumptions
+  and broker constraints including `volume_min` and `volume_step`.
+- Future evidence must cover spread regimes, ATR/volatility regimes,
+  stop-distance distributions, MAE/MFE if available, drawdown proxy, BUY/SELL
+  balance, and raw candidate spam penalty.
+- Production remains explicitly disabled:
+  `production_strategy_change_recommended: false` and
+  `live_order_enablement_recommended: false`.
+- This checkpoint is planning only. It does not change production strategy
+  behavior, risk settings, safety gates, order routing, `allow_order_send`, or
+  AI annotation behavior.
+
 ## v0.2.6 Operational Safety Guarantees
 
 - Default `configs/xm_gold_ai_trader.demo.yaml` has

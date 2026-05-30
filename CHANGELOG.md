@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.5.5-forward-evidence-plan
+
+- Extended `scripts/strategy_hypothesis_lab.py --json` with top-level
+  `forward_evidence_plan`.
+- Defined evidence gates required before any future v0.6 parameter-candidate or
+  strategy-change research phase.
+- Added forward enriched live dry-run requirements:
+  - at least `500` enriched closed bars
+  - at least `5` final dry-run `SIGNAL` observations
+  - at least `95%` diagnostics coverage
+- Defined out-of-sample historical split requirements with no parameter
+  selection on the test split.
+- Defined risk and execution feasibility requirements for account balances,
+  risk percentages, fixed risk budgets, and broker volume constraints.
+- Defined market-condition sensitivity requirements for spread, ATR/volatility,
+  stop distance, risk-per-lot, and lot distributions.
+- Defined trade-quality diagnostics requirements for MAE/MFE, drawdown proxy,
+  BUY/SELL balance, and raw candidate spam penalty.
+- Added explicit decision gates: v0.6 research may begin only after the required
+  evidence is collected; production strategy changes and live order enablement
+  remain blocked.
+- Added tests proving the forward evidence plan exists and keeps production and
+  live-order recommendations disabled.
+
+No trading logic, strategy thresholds, risk settings, safety checks, order
+routing, or AI annotation behavior changed. No AI trading, no `order_check`, no
+`order_send`, no martingale, no grid, and no lot increase after loss.
+
 ## v0.5.4-hypothesis-selection-evidence-pack
 
 - Extended `scripts/strategy_hypothesis_lab.py --json` with top-level

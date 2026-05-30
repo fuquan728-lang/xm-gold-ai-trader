@@ -382,6 +382,39 @@ def test_evidence_pack_explains_close_sma_contender_when_available():
     assert any("candidate" in reason for reason in contender["reasons"])
 
 
+def test_forward_evidence_plan_defines_v06_gates_without_production_enablement():
+    report = run_strategy_hypothesis_lab(
+        bars=oscillating_bars(),
+        symbol="GOLD_",
+        timeframe="M15",
+        symbol_info=SYMBOL_INFO,
+        trading_config=TradingConfig(risk=RiskConfig(max_spread_points=350)),
+        hypotheses=[risk_gated_crossover("risk_gated")],
+        account_equity=10.0,
+        data_source={"kind": "unit_test"},
+    )
+
+    plan = report["forward_evidence_plan"]
+
+    assert plan["hypothetical_only"] is True
+    assert plan["read_only_research_plan"] is True
+    assert plan["production_strategy_change_recommended"] is False
+    assert plan["live_order_enablement_recommended"] is False
+    assert plan["ai_trading_behavior_introduced"] is False
+    assert plan["forward_enriched_live_dry_run_requirement"]["minimum_enriched_closed_bars"] == 500
+    assert plan["forward_enriched_live_dry_run_requirement"]["minimum_final_signal_count"] == 5
+    assert plan["forward_enriched_live_dry_run_requirement"]["minimum_diagnostics_coverage_pct"] == 0.95
+    assert plan["out_of_sample_historical_split"]["no_parameter_selection_on_test_split"] is True
+    assert "volume_min" in plan["risk_and_execution_feasibility"]["required_constraints"]
+    assert "spread_points" in plan["market_condition_sensitivity"]["required_distributions"]
+    assert plan["trade_quality_diagnostics"]["raw_candidate_spam_penalty_required"] is True
+    assert plan["decision_gates"]["explicit_no_live_order_recommendation"] is True
+    assert plan["decision_gates"]["production_ready"] is False
+    assert plan["orders_sent"] == 0
+    assert plan["order_check_called"] is False
+    assert plan["order_send_called"] is False
+
+
 def test_trend_continuation_hypothesis_generates_candidates_without_changing_baseline():
     report = run_strategy_hypothesis_lab(
         bars=trending_bars(),
