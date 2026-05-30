@@ -1102,6 +1102,10 @@ def _collect_forward_window_stats(journal_glob: str = "logs/dry_run_signals/*.js
             "final_signal_count": 0,
             "diagnostics_coverage_pct": 0.0,
             "top_block_reasons": [],
+            "no_new_bar_journal_count": 0,
+            "market_advancing": False,
+            "weekend_or_market_closed_possible": False,
+            "campaigns_without_bar_advance": [],
             "window_note": "forward evidence window = journals with diagnostics present (schema_version >= 1)",
         }
 
@@ -1109,12 +1113,28 @@ def _collect_forward_window_stats(journal_glob: str = "logs/dry_run_signals/*.js
     final_signal_count = 0
     complete_diag_count = 0
     block_reasons: Counter[str] = Counter()
+    no_new_bar_journals = 0
+    previous_bar_time: str | None = None
+    campaigns_with_no_advance: set[str] = set()
+    last_bar_per_campaign: dict[str, str] = {}
+    all_campaign_ids: set[str] = set()
 
     required_diag_keys = {"signal", "feasibility", "failed_pre_signal_rule_names", "failed_feasibility_rule_names"}
-    for d in enriched_journals:
-        cbt = d.get("latest_closed_bar_time", "")
+    # Sort by timestamp for chronological bar-time progression detection
+    sorted_enriched = sorted(enriched_journals, key=lambda d: d.get("timestamp_utc", ""))
+    for d in sorted_enriched:
+        cbt = str(d.get("latest_closed_bar_time", ""))
+        campaign_id = str(d.get("campaign_id", ""))
         if cbt:
-            unique_closed_bars.add(str(cbt))
+            unique_closed_bars.add(cbt)
+            # Detect no-new-bar: bar time unchanged from previous journal
+            if previous_bar_time is not None and cbt == previous_bar_time:
+                no_new_bar_journals += 1
+                if campaign_id and campaign_id != "None":
+                    campaigns_with_no_advance.add(campaign_id)
+            previous_bar_time = cbt
+            if campaign_id and campaign_id != "None":
+                all_campaign_ids.add(campaign_id)
         action = str(d.get("action", "")).upper()
         if action in ("BUY", "SELL"):
             final_signal_count += 1
@@ -1126,6 +1146,13 @@ def _collect_forward_window_stats(journal_glob: str = "logs/dry_run_signals/*.js
         for reason in diag.get("failed_feasibility_rule_names", []) or []:
             block_reasons[str(reason)] += 1
 
+    # Market advancing: at least one bar-time advance detected across all journals
+    market_advancing = len(unique_closed_bars) > 1
+    # Weekend/closed: multiple campaigns see the same latest bar without advance
+    weekend_or_market_closed_possible = (
+        len(campaigns_with_no_advance) > 0 and not market_advancing
+    ) or (no_new_bar_journals > 0 and len(unique_closed_bars) <= 1)
+
     coverage_pct = (complete_diag_count / total_enriched * 100) if total_enriched > 0 else 0.0
     top_blocks = [{"reason": r, "count": c} for r, c in block_reasons.most_common(5)]
 
@@ -1136,6 +1163,10 @@ def _collect_forward_window_stats(journal_glob: str = "logs/dry_run_signals/*.js
         "final_signal_count": final_signal_count,
         "diagnostics_coverage_pct": round(coverage_pct, 2),
         "top_block_reasons": top_blocks,
+        "no_new_bar_journal_count": no_new_bar_journals,
+        "market_advancing": market_advancing,
+        "weekend_or_market_closed_possible": weekend_or_market_closed_possible,
+        "campaigns_without_bar_advance": sorted(campaigns_with_no_advance),
         "window_note": "forward evidence window = journals with diagnostics present (schema_version >= 1); legacy pre-enrichment journals excluded from coverage denominator",
     }
 
@@ -1149,6 +1180,10 @@ def forward_sample_collection_plan(
     legacy_journals_excluded: int = 0,
     top_block_reasons: list[dict[str, Any]] | None = None,
     window_note: str = "",
+    no_new_bar_journal_count: int = 0,
+    market_advancing: bool = True,
+    weekend_or_market_closed_possible: bool = False,
+    campaigns_without_bar_advance: list[str] | None = None,
 ) -> dict[str, Any]:
     required_bars = 500
     required_signals = 5
@@ -1173,6 +1208,13 @@ def forward_sample_collection_plan(
             "legacy_journals_excluded": legacy_journals_excluded,
             "top_block_reasons": top_block_reasons or [],
             "note": window_note or "forward evidence window = enriched journals only; legacy pre-enrichment journals excluded from coverage denominator",
+            "market_bar_guard": {
+                "no_new_bar_journal_count": no_new_bar_journal_count,
+                "market_advancing": market_advancing,
+                "weekend_or_market_closed_possible": weekend_or_market_closed_possible,
+                "campaigns_without_bar_advance": campaigns_without_bar_advance or [],
+                "rule": "journals with same latest_closed_bar_time as previous are NO_NEW_MARKET_BAR and do not count as new forward evidence",
+            },
         },
         "progress": {
             "enriched_closed_bars": {

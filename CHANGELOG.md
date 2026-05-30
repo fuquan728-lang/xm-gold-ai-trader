@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.5.9-no-new-market-bar-guard
+
+- Extended `_collect_forward_window_stats()` with bar-time progression
+  detection across enriched journals.
+- Added `market_bar_guard` to `forward_sample_collection_plan.window` with:
+  `no_new_bar_journal_count`, `market_advancing`,
+  `weekend_or_market_closed_possible`, and `campaigns_without_bar_advance`.
+- Journals whose `latest_closed_bar_time` matches the previous journal are
+  flagged as `NO_NEW_MARKET_BAR` and explicitly do not count as forward
+  evidence (bar dedup via set already prevented inflation; this adds
+  visibility).
+- Current detection: 3 no-new-bar journals from 2 weekend campaigns.
+- Does not change `enriched_closed_bar_count` (already uses set dedup).
+- No strategy, risk, safety, order routing, or AI annotation changes.
+
 ## v0.5.8-repository-hygiene-cleanup
 
 - Moved 2 stale root markdown files + 6 obsolete tech reports to

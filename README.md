@@ -699,6 +699,20 @@ This remains observation-only. It must not call `order_check`, must not call
   to `archive/obsolete_tools/`.
 - No strategy, risk, safety, order routing, or AI annotation changes.
 
+## v0.5.9 No-New-Market-Bar Guard
+
+- Release notes:
+  `docs/release_notes/v0.5.9-no-new-market-bar-guard.md`.
+- Added `market_bar_guard` to forward sample collection plan — detects when
+  `latest_closed_bar_time` has not advanced across enriched journals.
+- Journals with duplicate bar time are flagged as `NO_NEW_MARKET_BAR` and
+  explicitly excluded from forward evidence counts.
+- Reports `no_new_bar_journal_count`, `market_advancing`,
+  `weekend_or_market_closed_possible`, and affected campaign IDs.
+- Current detection: 3 duplicate-bar journals from 2 weekend campaigns.
+- Prevents weekend/cached bar confusion without changing strategy, risk,
+  safety, order routing, or AI annotation behavior.
+
 ## v0.2.6 Operational Safety Guarantees
 
 - Default `configs/xm_gold_ai_trader.demo.yaml` has
