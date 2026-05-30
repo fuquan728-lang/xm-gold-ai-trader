@@ -293,6 +293,95 @@ def test_risk_normalized_ranking_does_not_reward_raw_signal_spam_when_feasibilit
         assert spammy["normalized_ranking_score"] < balanced["normalized_ranking_score"]
 
 
+def test_hypothesis_selection_evidence_pack_exists_and_disables_production_recommendation():
+    report = run_strategy_hypothesis_lab(
+        bars=oscillating_bars(),
+        symbol="GOLD_",
+        timeframe="M15",
+        symbol_info=SYMBOL_INFO,
+        trading_config=TradingConfig(risk=RiskConfig(max_spread_points=350)),
+        hypotheses=[
+            risk_gated_crossover("risk_gated"),
+            candidate_only_crossover("candidate_only"),
+        ],
+        account_equity=10.0,
+        data_source={"kind": "unit_test"},
+    )
+
+    pack = report["hypothesis_selection_evidence_pack"]
+    decision = pack["production_decision"]
+
+    assert pack["hypothetical_only"] is True
+    assert pack["read_only_offline_research"] is True
+    assert pack["not_production_selection"] is True
+    assert pack["selected_offline_hypothesis"] == "risk_gated"
+    assert pack["baseline_candidate_feasibility"]["candidate_signal_count"] > 0
+    assert pack["minimum_lot_feasibility_bottleneck"]["lot_below_volume_min_count"] > 0
+    assert pack["risk_budget_frontier_summary"]
+    assert pack["normalized_ranking_summary"]["ranking_is_production_selector"] is False
+    assert decision["production_ready"] is False
+    assert decision["production_strategy_change_recommended"] is False
+    assert decision["live_order_enablement_recommended"] is False
+    assert decision["ai_trading_behavior_introduced"] is False
+    assert "NO_PRODUCTION_STRATEGY_CHANGE_RECOMMENDED" in decision["reason_codes"]
+    assert pack["next_evidence_required"]
+    assert pack["orders_sent"] == 0
+    assert pack["order_check_called"] is False
+    assert pack["order_send_called"] is False
+
+
+def test_hypothesis_selection_evidence_pack_selected_hypothesis_is_deterministic():
+    kwargs = {
+        "bars": oscillating_bars(),
+        "symbol": "GOLD_",
+        "timeframe": "M15",
+        "symbol_info": SYMBOL_INFO,
+        "trading_config": TradingConfig(risk=RiskConfig(max_spread_points=350)),
+        "hypotheses": [
+            risk_gated_crossover("risk_gated"),
+            candidate_only_crossover("candidate_only"),
+        ],
+        "account_equity": 10.0,
+        "data_source": {"kind": "unit_test"},
+    }
+
+    first = run_strategy_hypothesis_lab(**kwargs)["hypothesis_selection_evidence_pack"]
+    second = run_strategy_hypothesis_lab(**kwargs)["hypothesis_selection_evidence_pack"]
+
+    assert first == second
+    assert first["selected_offline_hypothesis"] == second["selected_offline_hypothesis"]
+
+
+def test_evidence_pack_explains_close_sma_contender_when_available():
+    report = run_strategy_hypothesis_lab(
+        bars=oscillating_bars(),
+        symbol="GOLD_",
+        timeframe="M15",
+        symbol_info=SYMBOL_INFO,
+        trading_config=TradingConfig(risk=RiskConfig(max_spread_points=350)),
+        hypotheses=[
+            risk_gated_crossover("risk_gated"),
+            HypothesisDefinition(
+                name="sma_10_30_risk_gated",
+                family="sma_parameter_variant",
+                description="Unit-test contender.",
+                signal_mode="sma_crossover",
+                signal_config=BaselineSignalConfig(fast_sma=2, slow_sma=4, atr_period=2),
+                risk_gated=True,
+            ),
+        ],
+        account_equity=10.0,
+        data_source={"kind": "unit_test"},
+    )
+
+    contender = report["hypothesis_selection_evidence_pack"]["why_sma_10_30_not_selected_yet"]
+
+    assert contender["contender"] == "sma_10_30_risk_gated"
+    assert contender["contender_present"] is True
+    assert contender["budget_25_contender"] is not None
+    assert any("candidate" in reason for reason in contender["reasons"])
+
+
 def test_trend_continuation_hypothesis_generates_candidates_without_changing_baseline():
     report = run_strategy_hypothesis_lab(
         bars=trending_bars(),

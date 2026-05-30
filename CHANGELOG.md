@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.5.4-hypothesis-selection-evidence-pack
+
+- Extended `scripts/strategy_hypothesis_lab.py --json` with top-level
+  `hypothesis_selection_evidence_pack`.
+- The evidence pack summarizes baseline candidate feasibility, minimum-lot
+  bottlenecks, risk-budget frontier results, normalized rankings, and top
+  hypotheses by fixed risk budget.
+- Selected offline hypothesis remains `current_baseline_risk_gated`.
+- Added explicit production-disabled decision fields:
+  - `production_ready: false`
+  - `production_strategy_change_recommended: false`
+  - `live_order_enablement_recommended: false`
+  - `ai_trading_behavior_introduced: false`
+- Documented why raw candidate spam is penalized and why
+  `sma_10_30_risk_gated` is not selected yet despite being close at the `$25`
+  hypothetical risk budget.
+- Added `next_evidence_required` covering longer enriched live samples,
+  out-of-sample historical validation, drawdown/MAE/MFE analysis, spread regime
+  sensitivity, realistic minimum-lot feasibility, and forward dry-run evidence.
+- Added tests proving the evidence pack exists, selected hypothesis is
+  deterministic, production recommendation remains disabled, and safety fields
+  remain clean.
+
+No trading logic, strategy thresholds, risk settings, safety checks, order
+routing, or AI annotation behavior changed. No AI trading, no `order_check`, no
+`order_send`, no martingale, no grid, and no lot increase after loss.
+
 ## v0.5.3-risk-normalized-hypothesis-ranking
 
 - Extended `scripts/strategy_hypothesis_lab.py --json` with top-level

@@ -207,7 +207,13 @@ def run_strategy_hypothesis_lab(
     report["minimum_lot_feasibility_study"] = (
         current_baseline.get("minimum_lot_feasibility") if current_baseline is not None else None
     )
-    report["risk_normalized_hypothesis_ranking"] = risk_normalized_hypothesis_ranking(rows)
+    ranking = risk_normalized_hypothesis_ranking(rows)
+    report["risk_normalized_hypothesis_ranking"] = ranking
+    report["hypothesis_selection_evidence_pack"] = hypothesis_selection_evidence_pack(
+        rows=rows,
+        ranking=ranking,
+        current_baseline=current_baseline,
+    )
     report["summary"] = {
         "hypothesis_count": len(rows),
         "best_by_final_theoretical_signal_count": compact_hypothesis_summary(
@@ -833,6 +839,245 @@ def risk_normalized_hypothesis_ranking(rows: list[dict[str, Any]]) -> dict[str, 
         "orders_sent": 0,
         "order_check_called": False,
         "order_send_called": False,
+    }
+
+
+def hypothesis_selection_evidence_pack(
+    *,
+    rows: list[dict[str, Any]],
+    ranking: Mapping[str, Any],
+    current_baseline: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    selected_name = selected_offline_hypothesis_name(ranking)
+    selected_row = next((row for row in rows if row.get("name") == selected_name), current_baseline)
+    baseline = current_baseline or {}
+    baseline_feasibility = baseline.get("minimum_lot_feasibility", {})
+    if not isinstance(baseline_feasibility, Mapping):
+        baseline_feasibility = {}
+    fixed_frontier = fixed_budget_frontier_summary(baseline_feasibility)
+    ranking_summary = top_ranked_budget_summary(ranking)
+    sma_10_30 = next((row for row in rows if row.get("name") == "sma_10_30_risk_gated"), None)
+    return {
+        "hypothetical_only": True,
+        "read_only_offline_research": True,
+        "not_production_selection": True,
+        "selected_offline_hypothesis": selected_name,
+        "selected_hypothesis_summary": compact_hypothesis_summary(selected_row),
+        "baseline_candidate_feasibility": baseline_candidate_feasibility_summary(baseline),
+        "minimum_lot_feasibility_bottleneck": minimum_lot_bottleneck_summary(baseline_feasibility),
+        "risk_budget_frontier_summary": fixed_frontier,
+        "normalized_ranking_summary": {
+            "top_ranked_by_budget": ranking_summary,
+            "scoring_model": ranking.get("scoring_model"),
+            "ranking_is_production_selector": False,
+        },
+        "why_current_baseline_remains_preferred": [
+            "It is the top ranked offline hypothesis across the tested fixed risk budgets.",
+            "It is risk-gated rather than candidate-only.",
+            "It has balanced historical BUY/SELL candidates.",
+            "It avoids the raw candidate-spam penalty applied to broader hypotheses.",
+            "Its feasibility improves as risk budget increases without changing production thresholds.",
+        ],
+        "why_raw_candidate_spam_is_penalized": [
+            "Raw candidate count alone can overstate signal quality.",
+            "A larger candidate stream can be less useful when many candidates remain infeasible under broker minimum lot constraints.",
+            "The score caps the feasible-count contribution and adds a penalty when candidates greatly exceed the current baseline count.",
+            "This keeps relaxed and trend-continuation diagnostics from ranking higher only because they fire more often.",
+        ],
+        "why_sma_10_30_not_selected_yet": why_sma_10_30_not_selected_summary(
+            ranking=ranking,
+            sma_10_30=sma_10_30,
+            selected_name=selected_name,
+        ),
+        "production_decision": {
+            "production_ready": False,
+            "production_strategy_change_recommended": False,
+            "live_order_enablement_recommended": False,
+            "ai_trading_behavior_introduced": False,
+            "reason_codes": [
+                "READ_ONLY_RESEARCH_ONLY",
+                "LIVE_SIGNAL_COUNT_ZERO",
+                "MINIMUM_LOT_FEASIBILITY_REQUIRES_MORE_EVIDENCE",
+                "NO_PRODUCTION_STRATEGY_CHANGE_RECOMMENDED",
+            ],
+            "reasons": [
+                "The evidence pack is offline research only.",
+                "Live dry-run final SIGNAL count is still zero.",
+                "Minimum-lot feasibility depends heavily on hypothetical risk budgets.",
+                "No production strategy, risk setting, safety gate, or order routing change is recommended.",
+            ],
+        },
+        "next_evidence_required": [
+            "Longer enriched live dry-run sample window across multiple sessions and spread regimes.",
+            "Out-of-sample historical split for the current baseline and close contenders.",
+            "Drawdown, MAE, and MFE analysis for feasible historical candidates when available.",
+            "Spread regime sensitivity for candidate feasibility and stop-distance behavior.",
+            "Minimum-lot feasibility under realistic account balance and risk-per-trade assumptions.",
+            "Forward dry-run confirmation that final SIGNAL count is nonzero before any future parameter-candidate stage.",
+        ],
+        "orders_sent": 0,
+        "order_check_called": False,
+        "order_send_called": False,
+    }
+
+
+def selected_offline_hypothesis_name(ranking: Mapping[str, Any]) -> str | None:
+    counts: Counter[str] = Counter()
+    score_totals: Counter[str] = Counter()
+    for item in ranking.get("top_ranked_by_budget", []):
+        if not isinstance(item, Mapping):
+            continue
+        top = item.get("top_hypothesis")
+        if not isinstance(top, Mapping):
+            continue
+        name = top.get("hypothesis_name")
+        if not isinstance(name, str):
+            continue
+        counts.update([name])
+        score_totals[name] += float(top.get("normalized_ranking_score", 0.0) or 0.0)
+    if not counts:
+        return None
+    return sorted(
+        counts,
+        key=lambda name: (-counts[name], -score_totals[name], name),
+    )[0]
+
+
+def baseline_candidate_feasibility_summary(row: Mapping[str, Any]) -> dict[str, Any]:
+    minimum_lot = row.get("minimum_lot_feasibility", {})
+    if not isinstance(minimum_lot, Mapping):
+        minimum_lot = {}
+    computed = minimum_lot.get("computed_lot_distribution", {})
+    normalized = minimum_lot.get("normalized_lot_distribution", {})
+    return {
+        "hypothesis_name": row.get("name"),
+        "candidate_signal_count": row.get("candidate_signal_count", 0),
+        "final_theoretical_signal_count": row.get("final_theoretical_signal_count", 0),
+        "candidate_buy_count": row.get("candidate_buy_count", 0),
+        "candidate_sell_count": row.get("candidate_sell_count", 0),
+        "lot_below_volume_min_count": minimum_lot.get("lot_below_volume_min_count", 0),
+        "computed_lot_median": computed.get("median") if isinstance(computed, Mapping) else None,
+        "normalized_lot_median": normalized.get("median") if isinstance(normalized, Mapping) else None,
+        "top_block_reasons": row.get("top_block_reasons", []),
+    }
+
+
+def minimum_lot_bottleneck_summary(minimum_lot: Mapping[str, Any]) -> dict[str, Any]:
+    required_risk = minimum_lot.get("minimum_lot_risk_amount_distribution", {})
+    required_balance = minimum_lot.get("account_balance_required_at_current_risk_pct_distribution", {})
+    risk_pct_required = minimum_lot.get("risk_pct_required_at_account_equity_distribution", {})
+    return {
+        "hypothetical_only": True,
+        "volume_min": minimum_lot.get("volume_min"),
+        "volume_step": minimum_lot.get("volume_step"),
+        "candidate_count": minimum_lot.get("candidate_count", 0),
+        "lot_below_volume_min_count": minimum_lot.get("lot_below_volume_min_count", 0),
+        "current_account_risk_amount": minimum_lot.get("current_account_risk_amount"),
+        "required_risk_amount_median": required_risk.get("median") if isinstance(required_risk, Mapping) else None,
+        "required_balance_at_current_risk_pct_median": required_balance.get("median")
+        if isinstance(required_balance, Mapping)
+        else None,
+        "risk_pct_required_at_account_equity_median": risk_pct_required.get("median")
+        if isinstance(risk_pct_required, Mapping)
+        else None,
+    }
+
+
+def fixed_budget_frontier_summary(minimum_lot: Mapping[str, Any]) -> list[dict[str, Any]]:
+    frontier = minimum_lot.get("risk_budget_frontier", {})
+    if not isinstance(frontier, Mapping):
+        return []
+    rows = []
+    for scenario in frontier.get("fixed_risk_budget_scenarios", []):
+        if not isinstance(scenario, Mapping):
+            continue
+        rows.append(
+            {
+                "risk_budget": scenario.get("fixed_risk_budget"),
+                "feasible_candidate_count": scenario.get("feasible_candidate_count"),
+                "infeasible_candidate_count": scenario.get("infeasible_candidate_count"),
+                "feasible_percentage": scenario.get("feasible_percentage"),
+                "median_computed_lot": scenario.get("median_computed_lot"),
+                "median_normalized_lot": scenario.get("median_normalized_lot"),
+                "median_risk_shortfall": scenario.get("median_risk_shortfall"),
+            }
+        )
+    return rows
+
+
+def top_ranked_budget_summary(ranking: Mapping[str, Any]) -> list[dict[str, Any]]:
+    summary = []
+    for item in ranking.get("top_ranked_by_budget", []):
+        if not isinstance(item, Mapping):
+            continue
+        top = item.get("top_hypothesis")
+        if not isinstance(top, Mapping):
+            continue
+        summary.append(
+            {
+                "risk_budget": item.get("risk_budget"),
+                "hypothesis_name": top.get("hypothesis_name"),
+                "normalized_ranking_score": top.get("normalized_ranking_score"),
+                "feasible_candidate_count": top.get("feasible_candidate_count"),
+                "total_candidates": top.get("total_candidates"),
+                "feasible_percentage": top.get("feasible_percentage"),
+                "median_risk_shortfall": top.get("median_risk_shortfall"),
+            }
+        )
+    return summary
+
+
+def why_sma_10_30_not_selected_summary(
+    *,
+    ranking: Mapping[str, Any],
+    sma_10_30: Mapping[str, Any] | None,
+    selected_name: str | None,
+) -> dict[str, Any]:
+    budget_25 = ranking_row_for_budget(ranking, risk_budget=25.0, hypothesis_name="sma_10_30_risk_gated")
+    selected_budget_25 = ranking_row_for_budget(ranking, risk_budget=25.0, hypothesis_name=selected_name)
+    return {
+        "contender": "sma_10_30_risk_gated",
+        "selected": selected_name,
+        "contender_present": sma_10_30 is not None,
+        "budget_25_contender": compact_ranking_row(budget_25),
+        "budget_25_selected": compact_ranking_row(selected_budget_25),
+        "reasons": [
+            "It is close at the $25 hypothetical risk budget but has a larger raw candidate count.",
+            "The scoring model penalizes candidate expansion that may represent signal spam.",
+            "It has not yet been validated with longer enriched live samples or out-of-sample historical evidence.",
+            "No production strategy threshold change is recommended from offline ranking alone.",
+        ],
+    }
+
+
+def ranking_row_for_budget(
+    ranking: Mapping[str, Any],
+    *,
+    risk_budget: float,
+    hypothesis_name: str | None,
+) -> Mapping[str, Any] | None:
+    if hypothesis_name is None:
+        return None
+    for group in ranking.get("rankings_by_fixed_risk_budget", []):
+        if not isinstance(group, Mapping) or numeric_or_none(group.get("risk_budget")) != risk_budget:
+            continue
+        for row in group.get("rankings", []):
+            if isinstance(row, Mapping) and row.get("hypothesis_name") == hypothesis_name:
+                return row
+    return None
+
+
+def compact_ranking_row(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    return {
+        "rank": row.get("rank"),
+        "hypothesis_name": row.get("hypothesis_name"),
+        "normalized_ranking_score": row.get("normalized_ranking_score"),
+        "total_candidates": row.get("total_candidates"),
+        "feasible_candidate_count": row.get("feasible_candidate_count"),
+        "feasible_percentage": row.get("feasible_percentage"),
+        "median_risk_shortfall": row.get("median_risk_shortfall"),
     }
 
 

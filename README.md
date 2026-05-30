@@ -588,6 +588,30 @@ This remains observation-only. It must not call `order_check`, must not call
   strategy behavior, risk settings, safety gates, order routing,
   `allow_order_send`, or AI annotation behavior.
 
+## v0.5.4 Hypothesis Selection Evidence Pack
+
+- Release notes:
+  `docs/release_notes/v0.5.4-hypothesis-selection-evidence-pack.md`.
+- Extended `scripts\strategy_hypothesis_lab.py --json` with
+  `hypothesis_selection_evidence_pack`.
+- The evidence pack summarizes baseline candidate feasibility, minimum-lot
+  bottlenecks, risk-budget frontier results, normalized rankings, top ranked
+  hypotheses by budget, and why `current_baseline_risk_gated` remains preferred
+  offline.
+- It explicitly reports that production is not ready:
+  `production_strategy_change_recommended: false`,
+  `live_order_enablement_recommended: false`, and
+  `ai_trading_behavior_introduced: false`.
+- It records why raw candidate spam is penalized and why
+  `sma_10_30_risk_gated` is not selected yet despite being close at the `$25`
+  hypothetical risk budget.
+- Next evidence required includes longer enriched live samples,
+  out-of-sample validation, drawdown/MAE/MFE analysis, spread regime
+  sensitivity, realistic minimum-lot feasibility, and forward dry-run evidence.
+- This checkpoint is offline research only. It does not change production
+  strategy behavior, risk settings, safety gates, order routing,
+  `allow_order_send`, or AI annotation behavior.
+
 ## v0.2.6 Operational Safety Guarantees
 
 - Default `configs/xm_gold_ai_trader.demo.yaml` has
