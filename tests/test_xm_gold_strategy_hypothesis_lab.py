@@ -415,6 +415,73 @@ def test_forward_evidence_plan_defines_v06_gates_without_production_enablement()
     assert plan["order_send_called"] is False
 
 
+def test_forward_sample_collection_plan_exists_and_defines_tracking_fields():
+    report = run_strategy_hypothesis_lab(
+        bars=oscillating_bars(),
+        symbol="GOLD_",
+        timeframe="M15",
+        symbol_info=SYMBOL_INFO,
+        trading_config=TradingConfig(risk=RiskConfig(max_spread_points=350)),
+        hypotheses=[risk_gated_crossover("risk_gated")],
+        account_equity=10.0,
+        data_source={"kind": "unit_test"},
+    )
+
+    plan = report["forward_sample_collection_plan"]
+
+    assert plan["hypothetical_only"] is True
+    assert plan["read_only_research_plan"] is True
+    assert plan["production_strategy_change_recommended"] is False
+    assert plan["live_order_enablement_recommended"] is False
+    assert plan["ai_trading_behavior_introduced"] is False
+
+    progress = plan["progress"]
+    bars = progress["enriched_closed_bars"]
+    signals = progress["final_dry_run_signals"]
+    coverage = progress["diagnostics_coverage"]
+
+    assert bars["current"] == 0
+    assert bars["required"] == 500
+    assert bars["remaining"] == 500
+    assert bars["met"] is False
+
+    assert signals["current"] == 0
+    assert signals["required"] == 5
+    assert signals["remaining"] == 5
+    assert signals["met"] is False
+
+    assert coverage["current_pct"] == 0.0
+    assert coverage["required_pct"] == 95.0
+    assert coverage["met"] is False
+
+    summary = progress["summary"]
+    assert summary["all_gates_met"] is False
+    assert summary["ready_for_v06_research"] is False
+    assert summary["offline_research_only"] is True
+
+    assert plan["forward_evidence_gates_met"] is False
+
+    sampling = plan["sampling_command"]
+    assert "run_dry_observation_campaign.py" in sampling["command"]
+    assert "--bar-close-only" in sampling["command"]
+    assert "--json" in sampling["command"]
+    assert sampling["parameters"]["bar_close_only"] is True
+
+    cadence = plan["sampling_cadence"]
+    assert any("allow_order_send" in rule for rule in cadence["rules"])
+    assert len(cadence["recommended_review_points"]) >= 2
+
+    gates = plan["what_gates_met_unlocks"]
+    assert gates["allows_v06_parameter_candidate_research"] is False
+    assert gates["does_not_allow_production_strategy_changes"] is True
+    assert gates["does_not_allow_live_order_enablement"] is True
+
+    assert plan["orders_sent"] == 0
+    assert plan["order_check_called"] is False
+    assert plan["order_send_called"] is False
+    assert len(plan["next_steps_after_gates_met"]) >= 3
+
+
 def test_trend_continuation_hypothesis_generates_candidates_without_changing_baseline():
     report = run_strategy_hypothesis_lab(
         bars=trending_bars(),

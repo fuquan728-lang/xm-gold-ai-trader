@@ -635,6 +635,29 @@ This remains observation-only. It must not call `order_check`, must not call
   behavior, risk settings, safety gates, order routing, `allow_order_send`, or
   AI annotation behavior.
 
+## v0.5.6 Forward Sample Collection Plan
+
+- Release notes:
+  `docs/release_notes/v0.5.6-forward-sample-collection-plan.md`.
+- Extended `scripts\strategy_hypothesis_lab.py --json` with
+  `forward_sample_collection_plan`.
+- Converted v0.5.5 forward evidence gates into an executable read-only
+  sampling plan with progress tracking.
+- Each gate reports `current`, `required`, `remaining`, and `met`:
+  enriched closed bars (target: `500`), final dry-run SIGNALs (target: `5`),
+  diagnostics coverage (target: `95%`).
+- Gates default to zero/unmet — no gate is treated as passed by accident.
+- Included recommended sampling command with bounded, bar-close-only parameters
+  and explicit cadence rules.
+- Defined what passing all gates unlocks (v0.6 offline parameter-candidate
+  research) and what remains blocked (production strategy changes, live order
+  enablement).
+- Current progress: `0 / 500` enriched closed bars, `0 / 5` final SIGNALs,
+  `0%` diagnostics coverage, all gates unmet.
+- This checkpoint is planning only. It does not change production strategy
+  behavior, risk settings, safety gates, order routing, `allow_order_send`, or
+  AI annotation behavior.
+
 ## v0.2.6 Operational Safety Guarantees
 
 - Default `configs/xm_gold_ai_trader.demo.yaml` has

@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.5.6-forward-sample-collection-plan
+
+- Extended `scripts/strategy_hypothesis_lab.py --json` with top-level
+  `forward_sample_collection_plan`.
+- Converted v0.5.5 forward evidence gates into an executable read-only
+  sampling plan with progress tracking.
+- Added per-gate progress tracking: enriched closed-bar count (target: 500),
+  final dry-run SIGNAL count (target: 5), and diagnostics coverage percentage
+  (target: 95%).
+- Each gate reports `current`, `required`, `remaining`, and `met` status.
+- Gates default to unmet — no gate is treated as passed by accident.
+- Added recommended sampling command with bounded, bar-close-only parameters.
+- Added explicit sampling cadence rules and review checkpoints.
+- Documented what gates met unlocks (v0.6 research begins) and what remains
+  blocked (production strategy changes, live order enablement).
+- Defined next steps after gates pass: out-of-sample split, minimum-lot
+  feasibility, spread/ATR regime sensitivity, and MAE/MFE analysis.
+- Added tests proving the plan exists, defines all required tracking fields,
+  and keeps safety guarantees clean.
+
+No trading logic, strategy thresholds, risk settings, safety checks, order
+routing, or AI annotation behavior changed. No AI trading, no `order_check`, no
+`order_send`, no martingale, no grid, and no lot increase after loss.
+
 ## v0.5.5-forward-evidence-plan
 
 - Extended `scripts/strategy_hypothesis_lab.py --json` with top-level

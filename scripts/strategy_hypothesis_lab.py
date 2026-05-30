@@ -215,6 +215,7 @@ def run_strategy_hypothesis_lab(
         current_baseline=current_baseline,
     )
     report["forward_evidence_plan"] = forward_evidence_plan()
+    report["forward_sample_collection_plan"] = forward_sample_collection_plan()
     report["summary"] = {
         "hypothesis_count": len(rows),
         "best_by_final_theoretical_signal_count": compact_hypothesis_summary(
@@ -1064,6 +1065,108 @@ def forward_evidence_plan() -> dict[str, Any]:
             "production_strategy_change_recommended": False,
             "live_order_enablement_recommended": False,
         },
+        "orders_sent": 0,
+        "order_check_called": False,
+        "order_send_called": False,
+    }
+
+
+def forward_sample_collection_plan(
+    *,
+    enriched_closed_bar_count: int = 0,
+    final_signal_count: int = 0,
+    diagnostics_coverage_pct: float = 0.0,
+) -> dict[str, Any]:
+    required_bars = 500
+    required_signals = 5
+    required_coverage = 0.95
+    bars_met = enriched_closed_bar_count >= required_bars
+    signals_met = final_signal_count >= required_signals
+    coverage_met = diagnostics_coverage_pct >= required_coverage
+    gates_met = bars_met and signals_met and coverage_met
+
+    return {
+        "hypothetical_only": True,
+        "read_only_research_plan": True,
+        "not_production_selection": True,
+        "production_strategy_change_recommended": False,
+        "live_order_enablement_recommended": False,
+        "ai_trading_behavior_introduced": False,
+        "forward_evidence_gates_met": gates_met,
+        "progress": {
+            "enriched_closed_bars": {
+                "current": enriched_closed_bar_count,
+                "required": required_bars,
+                "remaining": max(0, required_bars - enriched_closed_bar_count),
+                "met": bars_met,
+            },
+            "final_dry_run_signals": {
+                "current": final_signal_count,
+                "required": required_signals,
+                "remaining": max(0, required_signals - final_signal_count),
+                "met": signals_met,
+            },
+            "diagnostics_coverage": {
+                "current_pct": round(diagnostics_coverage_pct * 100, 2),
+                "required_pct": round(required_coverage * 100, 2),
+                "met": coverage_met,
+            },
+            "summary": {
+                "all_gates_met": gates_met,
+                "ready_for_v06_research": gates_met,
+                "offline_research_only": True,
+            },
+        },
+        "sampling_command": {
+            "command": (
+                "python scripts\\run_dry_observation_campaign.py "
+                "--symbol GOLD_ --timeframe M15 --interval-seconds 60 "
+                "--max-iterations <N> --bar-close-only --json"
+            ),
+            "description": (
+                "Run a bounded dry-run observation campaign collecting "
+                "enriched closed-bar journals without any order sending."
+            ),
+            "parameters": {
+                "symbol": "GOLD_",
+                "timeframe": "M15",
+                "interval_seconds": 60,
+                "max_iterations": "<N>",
+                "bar_close_only": True,
+                "json_output": True,
+            },
+        },
+        "sampling_cadence": {
+            "rules": [
+                "Bounded runs only — always use --max-iterations to limit the campaign.",
+                "Bar-close-only — never sample on incomplete bars.",
+                "Check progress after every run — review enriched bar count, signal count, and coverage.",
+                "Never change allow_order_send — keep execution.allow_order_send: false at all times.",
+                "If a campaign run fails or produces malformed journals, investigate before continuing.",
+            ],
+            "recommended_review_points": [
+                "After every 100 enriched closed bars: verify diagnostics coverage >= 95%.",
+                "After every 5 dry-run SIGNAL observations: verify journal quality and signal forensics.",
+                "Before declaring gates met: run full pipeline verification (pytest + all --json checks).",
+            ],
+        },
+        "what_gates_met_unlocks": {
+            "allows_v06_parameter_candidate_research": gates_met,
+            "does_not_allow_production_strategy_changes": True,
+            "does_not_allow_live_order_enablement": True,
+            "notes": [
+                "Passing forward evidence gates allows v0.6 offline parameter-candidate research to begin.",
+                "It does NOT enable any production strategy change, risk adjustment, or live order.",
+                "Even after gates pass, ALL production safety boundaries remain active.",
+            ],
+        },
+        "next_steps_after_gates_met": [
+            "Run out-of-sample historical split with candidate and feasibility counts separated.",
+            "Report minimum-lot feasibility under realistic account balance and risk-per-trade assumptions.",
+            "Measure spread and ATR regime sensitivity for feasible candidates.",
+            "Begin MAE/MFE and drawdown proxy analysis when sufficient history is available.",
+            "Maintain chronological train/test split — never select parameters on the test split.",
+        ],
         "orders_sent": 0,
         "order_check_called": False,
         "order_send_called": False,
