@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.5.3-risk-normalized-hypothesis-ranking
+
+- Extended `scripts/strategy_hypothesis_lab.py --json` with top-level
+  `risk_normalized_hypothesis_ranking`.
+- Rankings compare the existing offline hypotheses under shared fixed-dollar
+  risk budgets: `$2.50`, `$5.00`, `$10.00`, `$15.00`, and `$25.00`.
+- Each hypothesis/budget row reports total candidates, feasible candidates,
+  feasible percentage, BUY/SELL distribution, median computed lot, median
+  normalized lot, median stop distance/ATR, median risk shortfall, and blockers.
+- Added an offline scoring model that balances feasibility percentage, capped
+  feasible count, BUY/SELL balance, lower shortfall, reasonable stop distance,
+  risk-gated status, and candidate-spam penalty.
+- Current top ranked hypothesis is `current_baseline_risk_gated` across the
+  tested fixed-dollar risk budgets; it ranks higher because it avoids candidate
+  spam, remains risk-gated, and has balanced BUY/SELL candidates.
+- Added tests proving ranking output exists, rankings are deterministic, raw
+  high-candidate hypotheses are not automatically ranked best when feasibility
+  is poor, and safety fields remain clean.
+
+No trading logic, strategy thresholds, risk settings, safety checks, order
+routing, or AI annotation behavior changed. No AI trading, no `order_check`, no
+`order_send`, no martingale, no grid, and no lot increase after loss.
+
 ## v0.5.2-risk-budget-scenario-frontier
 
 - Extended `scripts/strategy_hypothesis_lab.py --json` with a read-only

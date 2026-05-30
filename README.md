@@ -567,6 +567,27 @@ This remains observation-only. It must not call `order_check`, must not call
   not change production strategy behavior, risk settings, safety gates, order
   routing, `allow_order_send`, or AI annotation behavior.
 
+## v0.5.3 Risk-Normalized Hypothesis Ranking
+
+- Release notes:
+  `docs/release_notes/v0.5.3-risk-normalized-hypothesis-ranking.md`.
+- Extended `scripts\strategy_hypothesis_lab.py --json` with
+  `risk_normalized_hypothesis_ranking`.
+- Rankings compare existing offline hypotheses under shared fixed risk budgets:
+  `$2.50`, `$5.00`, `$10.00`, `$15.00`, and `$25.00`.
+- Each row reports candidates, feasible candidates, feasible percentage,
+  BUY/SELL distribution, median computed/normalized lot, median stop
+  distance/ATR, median risk shortfall, and blockers.
+- The scoring model emphasizes feasibility percentage and penalizes raw
+  candidate spam, so a high-candidate hypothesis is not automatically ranked
+  best.
+- Current top ranked hypothesis across tested fixed budgets is
+  `current_baseline_risk_gated`, mainly because it is risk-gated, balanced, and
+  avoids the candidate-spam penalty.
+- This checkpoint is offline research only. It does not change production
+  strategy behavior, risk settings, safety gates, order routing,
+  `allow_order_send`, or AI annotation behavior.
+
 ## v0.2.6 Operational Safety Guarantees
 
 - Default `configs/xm_gold_ai_trader.demo.yaml` has

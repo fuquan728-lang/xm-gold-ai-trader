@@ -8,6 +8,7 @@ from scripts.strategy_hypothesis_lab import (
     REASON_NO_HISTORICAL_DATA,
     REASON_SYMBOL_INFO_UNAVAILABLE,
     HypothesisDefinition,
+    risk_normalized_hypothesis_ranking,
     run_strategy_hypothesis_lab,
 )
 from src.broker.order_executor import TradingConfig
@@ -205,6 +206,93 @@ def test_fixed_risk_budget_frontier_keeps_scenarios_hypothetical():
     assert report["order_send_called"] is False
 
 
+def test_risk_normalized_ranking_output_exists_and_is_read_only():
+    report = run_strategy_hypothesis_lab(
+        bars=oscillating_bars(),
+        symbol="GOLD_",
+        timeframe="M15",
+        symbol_info=SYMBOL_INFO,
+        trading_config=TradingConfig(risk=RiskConfig(max_spread_points=350)),
+        hypotheses=[
+            risk_gated_crossover("risk_gated"),
+            candidate_only_crossover("candidate_only"),
+        ],
+        account_equity=10.0,
+        data_source={"kind": "unit_test"},
+    )
+
+    ranking = report["risk_normalized_hypothesis_ranking"]
+    first_budget = ranking["rankings_by_fixed_risk_budget"][0]
+    first_row = first_budget["rankings"][0]
+
+    assert ranking["hypothetical_only"] is True
+    assert ranking["not_production_selection"] is True
+    assert ranking["orders_sent"] == 0
+    assert ranking["order_check_called"] is False
+    assert ranking["order_send_called"] is False
+    assert ranking["risk_budgets"] == [2.5, 5.0, 10.0, 15.0, 25.0]
+    assert first_row["rank"] == 1
+    assert first_row["total_candidates"] > 0
+    assert "normalized_ranking_score" in first_row
+    assert "score_components" in first_row
+    assert first_row["orders_sent"] == 0
+    assert first_row["order_check_called"] is False
+    assert first_row["order_send_called"] is False
+
+
+def test_risk_normalized_rankings_are_deterministic():
+    kwargs = {
+        "bars": oscillating_bars(),
+        "symbol": "GOLD_",
+        "timeframe": "M15",
+        "symbol_info": SYMBOL_INFO,
+        "trading_config": TradingConfig(risk=RiskConfig(max_spread_points=350)),
+        "hypotheses": [
+            risk_gated_crossover("risk_gated"),
+            candidate_only_crossover("candidate_only"),
+        ],
+        "account_equity": 10.0,
+        "data_source": {"kind": "unit_test"},
+    }
+
+    first = run_strategy_hypothesis_lab(**kwargs)["risk_normalized_hypothesis_ranking"]
+    second = run_strategy_hypothesis_lab(**kwargs)["risk_normalized_hypothesis_ranking"]
+
+    assert first == second
+
+
+def test_risk_normalized_ranking_does_not_reward_raw_signal_spam_when_feasibility_is_poor():
+    ranking = risk_normalized_hypothesis_ranking(
+        [
+            fake_ranking_row(
+                name="balanced_feasible",
+                total_candidates=20,
+                feasible_candidates=18,
+                feasible_buy=9,
+                feasible_sell=9,
+                median_risk_shortfall=0.0,
+                median_stop_distance_points=1_000.0,
+            ),
+            fake_ranking_row(
+                name="spammy_poor_feasibility",
+                total_candidates=1_000,
+                feasible_candidates=50,
+                feasible_buy=45,
+                feasible_sell=5,
+                median_risk_shortfall=20.0,
+                median_stop_distance_points=7_500.0,
+            ),
+        ]
+    )
+
+    for group in ranking["rankings_by_fixed_risk_budget"]:
+        assert group["rankings"][0]["hypothesis_name"] == "balanced_feasible"
+        spammy = next(row for row in group["rankings"] if row["hypothesis_name"] == "spammy_poor_feasibility")
+        balanced = next(row for row in group["rankings"] if row["hypothesis_name"] == "balanced_feasible")
+        assert spammy["total_candidates"] > balanced["total_candidates"]
+        assert spammy["normalized_ranking_score"] < balanced["normalized_ranking_score"]
+
+
 def test_trend_continuation_hypothesis_generates_candidates_without_changing_baseline():
     report = run_strategy_hypothesis_lab(
         bars=trending_bars(),
@@ -301,6 +389,61 @@ def scenario_by_matrix_key(
         if row["account_balance"] == account_balance and row["risk_pct"] == risk_pct:
             return row
     raise AssertionError(f"scenario not found for account_balance={account_balance} risk_pct={risk_pct}")
+
+
+def fake_ranking_row(
+    *,
+    name: str,
+    total_candidates: int,
+    feasible_candidates: int,
+    feasible_buy: int,
+    feasible_sell: int,
+    median_risk_shortfall: float,
+    median_stop_distance_points: float,
+) -> dict:
+    fixed_scenarios = [
+        {
+            "scenario_type": "fixed_risk_budget",
+            "hypothetical_only": True,
+            "not_production_settings": True,
+            "fixed_risk_budget": budget,
+            "risk_amount": budget,
+            "candidate_count": total_candidates,
+            "feasible_candidate_count": feasible_candidates,
+            "infeasible_candidate_count": total_candidates - feasible_candidates,
+            "feasible_percentage": feasible_candidates / total_candidates,
+            "candidate_buy_count": total_candidates // 2,
+            "candidate_sell_count": total_candidates - (total_candidates // 2),
+            "feasible_buy_count": feasible_buy,
+            "feasible_sell_count": feasible_sell,
+            "buy_sell_distribution": {
+                "candidate": {"BUY": total_candidates // 2, "SELL": total_candidates - (total_candidates // 2)},
+                "feasible": {"BUY": feasible_buy, "SELL": feasible_sell},
+            },
+            "median_computed_lot": 0.02,
+            "median_normalized_lot": 0.01 if feasible_candidates else 0.0,
+            "median_stop_distance_points": median_stop_distance_points,
+            "median_atr_points": median_stop_distance_points / 1.5,
+            "median_risk_shortfall": median_risk_shortfall,
+            "scenario_top_blockers": [{"reason": "LOT_BELOW_VOLUME_MIN", "count": total_candidates - feasible_candidates}],
+        }
+        for budget in [2.5, 5.0, 10.0, 15.0, 25.0]
+    ]
+    return {
+        "name": name,
+        "family": "unit_test",
+        "risk_gated": True,
+        "signal_mode": "unit_test",
+        "candidate_signal_count": total_candidates,
+        "candidate_buy_count": total_candidates // 2,
+        "candidate_sell_count": total_candidates - (total_candidates // 2),
+        "top_block_reasons": [{"reason": "LOT_BELOW_VOLUME_MIN", "count": total_candidates - feasible_candidates}],
+        "minimum_lot_feasibility": {
+            "stop_distance_points_distribution": {"median": median_stop_distance_points},
+            "atr_points_distribution": {"median": median_stop_distance_points / 1.5},
+            "risk_budget_frontier": {"fixed_risk_budget_scenarios": fixed_scenarios},
+        },
+    }
 
 
 def oscillating_bars() -> pd.DataFrame:

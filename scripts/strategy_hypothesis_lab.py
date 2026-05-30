@@ -207,6 +207,7 @@ def run_strategy_hypothesis_lab(
     report["minimum_lot_feasibility_study"] = (
         current_baseline.get("minimum_lot_feasibility") if current_baseline is not None else None
     )
+    report["risk_normalized_hypothesis_ranking"] = risk_normalized_hypothesis_ranking(rows)
     report["summary"] = {
         "hypothesis_count": len(rows),
         "best_by_final_theoretical_signal_count": compact_hypothesis_summary(
@@ -682,23 +683,41 @@ def frontier_row(
     normalized_lots: list[float] = []
     risk_shortfalls: list[float] = []
     required_risk_amounts: list[float] = []
+    stop_distance_points_values: list[float] = []
+    atr_points_values: list[float] = []
+    candidate_side_counter: Counter[str] = Counter()
+    feasible_side_counter: Counter[str] = Counter()
+    scenario_blocker_counter: Counter[str] = Counter()
     feasible_count = 0
 
     for record in records:
         risk_per_lot = numeric_or_none(record.get("risk_per_lot"))
         if risk_per_lot is None or risk_per_lot <= 0:
             continue
+        side = str(record.get("side", "")).upper()
+        if side in {"BUY", "SELL"}:
+            candidate_side_counter.update([side])
         minimum_lot_risk_amount = risk_per_lot * spec.volume_min
         computed_lot = risk_amount / risk_per_lot
         normalized_lot = floor_volume_to_step(computed_lot, spec.volume_min, spec.volume_max, spec.volume_step)
         risk_shortfall = max(0.0, minimum_lot_risk_amount - risk_amount)
+        stop_distance_points = numeric_or_none(record.get("stop_distance_points"))
+        atr_points = numeric_or_none(record.get("atr_points"))
 
         computed_lots.append(computed_lot)
         normalized_lots.append(normalized_lot)
         risk_shortfalls.append(risk_shortfall)
         required_risk_amounts.append(minimum_lot_risk_amount)
+        if stop_distance_points is not None:
+            stop_distance_points_values.append(stop_distance_points)
+        if atr_points is not None:
+            atr_points_values.append(atr_points)
         if normalized_lot >= spec.volume_min:
             feasible_count += 1
+            if side in {"BUY", "SELL"}:
+                feasible_side_counter.update([side])
+        else:
+            scenario_blocker_counter.update([REASON_LOT_BELOW_VOLUME_MIN])
 
     candidate_count = len(required_risk_amounts)
     infeasible_count = max(0, candidate_count - feasible_count)
@@ -720,11 +739,22 @@ def frontier_row(
         "feasible_candidate_count": feasible_count,
         "infeasible_candidate_count": infeasible_count,
         "feasible_percentage": feasible_count / candidate_count if candidate_count else 0.0,
+        "candidate_buy_count": candidate_side_counter.get("BUY", 0),
+        "candidate_sell_count": candidate_side_counter.get("SELL", 0),
+        "feasible_buy_count": feasible_side_counter.get("BUY", 0),
+        "feasible_sell_count": feasible_side_counter.get("SELL", 0),
+        "buy_sell_distribution": {
+            "candidate": {"BUY": candidate_side_counter.get("BUY", 0), "SELL": candidate_side_counter.get("SELL", 0)},
+            "feasible": {"BUY": feasible_side_counter.get("BUY", 0), "SELL": feasible_side_counter.get("SELL", 0)},
+        },
         "median_computed_lot": distribution(computed_lots)["median"],
         "median_normalized_lot": distribution(normalized_lots)["median"],
+        "median_stop_distance_points": distribution(stop_distance_points_values)["median"],
+        "median_atr_points": distribution(atr_points_values)["median"],
         "median_risk_shortfall": distribution(risk_shortfalls)["median"],
         "minimum_required_balance_estimate": minimum_required_balance_estimate,
         "risk_pct_for_required_balance_estimate": required_balance_risk_pct,
+        "scenario_top_blockers": counter_to_top(scenario_blocker_counter),
     }
     return row
 
@@ -739,6 +769,201 @@ def best_frontier_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
             float(row["risk_amount"]),
         ),
     )
+
+
+def risk_normalized_hypothesis_ranking(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    baseline_candidate_count = max(1, int(rows[0]["candidate_signal_count"])) if rows else 1
+    rankings_by_budget: list[dict[str, Any]] = []
+    for risk_budget in FRONTIER_FIXED_RISK_BUDGETS:
+        ranking_rows = [
+            ranking_row_for_hypothesis(
+                row=row,
+                scenario=fixed_budget_scenario(row, risk_budget),
+                baseline_candidate_count=baseline_candidate_count,
+            )
+            for row in rows
+        ]
+        ranking_rows.sort(
+            key=lambda row: (
+                -float(row["normalized_ranking_score"]),
+                -float(row["feasible_percentage"]),
+                -int(row["feasible_candidate_count"]),
+                int(row["total_candidates"]),
+                str(row["hypothesis_name"]),
+            )
+        )
+        for index, row in enumerate(ranking_rows, start=1):
+            row["rank"] = index
+        rankings_by_budget.append(
+            {
+                "risk_budget": risk_budget,
+                "hypothetical_only": True,
+                "not_production_selection": True,
+                "rankings": ranking_rows,
+            }
+        )
+
+    return {
+        "hypothetical_only": True,
+        "not_production_selection": True,
+        "risk_budgets": list(FRONTIER_FIXED_RISK_BUDGETS),
+        "scoring_model": {
+            "description": "Offline score balancing feasibility, capped feasible count, side balance, shortfall, stop profile, risk-gated status, and candidate-spam penalty.",
+            "weights": {
+                "feasibility_percentage": 0.45,
+                "capped_feasible_count": 0.10,
+                "buy_sell_balance": 0.15,
+                "lower_risk_shortfall": 0.15,
+                "reasonable_stop_distance": 0.10,
+                "risk_gated_bonus": 0.05,
+                "candidate_spam_penalty": -0.15,
+            },
+            "candidate_count_cap": baseline_candidate_count,
+            "candidate_spam_penalty_reference": baseline_candidate_count,
+            "important": "This ranking is offline research only and is not a production strategy selector.",
+        },
+        "rankings_by_fixed_risk_budget": rankings_by_budget,
+        "top_ranked_by_budget": [
+            {
+                "risk_budget": group["risk_budget"],
+                "top_hypothesis": group["rankings"][0] if group["rankings"] else None,
+            }
+            for group in rankings_by_budget
+        ],
+        "orders_sent": 0,
+        "order_check_called": False,
+        "order_send_called": False,
+    }
+
+
+def ranking_row_for_hypothesis(
+    *,
+    row: Mapping[str, Any],
+    scenario: Mapping[str, Any] | None,
+    baseline_candidate_count: int,
+) -> dict[str, Any]:
+    scenario = scenario or {}
+    minimum_lot = row.get("minimum_lot_feasibility", {})
+    if not isinstance(minimum_lot, Mapping):
+        minimum_lot = {}
+    stop_distribution = minimum_lot.get("stop_distance_points_distribution", {})
+    atr_distribution = minimum_lot.get("atr_points_distribution", {})
+    median_stop = numeric_or_none(scenario.get("median_stop_distance_points"))
+    if median_stop is None and isinstance(stop_distribution, Mapping):
+        median_stop = numeric_or_none(stop_distribution.get("median"))
+    median_atr = numeric_or_none(scenario.get("median_atr_points"))
+    if median_atr is None and isinstance(atr_distribution, Mapping):
+        median_atr = numeric_or_none(atr_distribution.get("median"))
+
+    total_candidates = int(scenario.get("candidate_count", row.get("candidate_signal_count", 0)) or 0)
+    feasible_count = int(scenario.get("feasible_candidate_count", 0) or 0)
+    feasible_percentage = float(scenario.get("feasible_percentage", 0.0) or 0.0)
+    feasible_buy = int(scenario.get("feasible_buy_count", 0) or 0)
+    feasible_sell = int(scenario.get("feasible_sell_count", 0) or 0)
+    median_risk_shortfall = float(scenario.get("median_risk_shortfall", 0.0) or 0.0)
+    score_components = ranking_score_components(
+        total_candidates=total_candidates,
+        feasible_count=feasible_count,
+        feasible_percentage=feasible_percentage,
+        feasible_buy=feasible_buy,
+        feasible_sell=feasible_sell,
+        median_risk_shortfall=median_risk_shortfall,
+        median_stop_distance_points=median_stop,
+        baseline_candidate_count=baseline_candidate_count,
+        risk_gated=bool(row.get("risk_gated")),
+    )
+    return {
+        "rank": None,
+        "hypothesis_name": row.get("name"),
+        "family": row.get("family"),
+        "risk_gated": bool(row.get("risk_gated")),
+        "signal_mode": row.get("signal_mode"),
+        "risk_budget": scenario.get("fixed_risk_budget", scenario.get("risk_amount")),
+        "total_candidates": total_candidates,
+        "feasible_candidate_count": feasible_count,
+        "infeasible_candidate_count": int(scenario.get("infeasible_candidate_count", 0) or 0),
+        "feasible_percentage": feasible_percentage,
+        "candidate_buy_count": int(scenario.get("candidate_buy_count", row.get("candidate_buy_count", 0)) or 0),
+        "candidate_sell_count": int(scenario.get("candidate_sell_count", row.get("candidate_sell_count", 0)) or 0),
+        "feasible_buy_count": feasible_buy,
+        "feasible_sell_count": feasible_sell,
+        "buy_sell_distribution": scenario.get("buy_sell_distribution"),
+        "median_computed_lot": scenario.get("median_computed_lot"),
+        "median_normalized_lot": scenario.get("median_normalized_lot"),
+        "median_stop_distance_points": median_stop,
+        "median_atr_points": median_atr,
+        "median_risk_shortfall": median_risk_shortfall,
+        "top_blockers": row.get("top_block_reasons", []),
+        "scenario_top_blockers": scenario.get("scenario_top_blockers", []),
+        "score_components": score_components,
+        "normalized_ranking_score": round(sum(score_components.values()), 6),
+        "hypothetical_only": True,
+        "not_production_selection": True,
+        "orders_sent": 0,
+        "order_check_called": False,
+        "order_send_called": False,
+    }
+
+
+def ranking_score_components(
+    *,
+    total_candidates: int,
+    feasible_count: int,
+    feasible_percentage: float,
+    feasible_buy: int,
+    feasible_sell: int,
+    median_risk_shortfall: float,
+    median_stop_distance_points: float | None,
+    baseline_candidate_count: int,
+    risk_gated: bool,
+) -> dict[str, float]:
+    baseline = max(1, baseline_candidate_count)
+    feasible_count_score = min(feasible_count / baseline, 1.0)
+    balance_score = buy_sell_balance_score(feasible_buy, feasible_sell)
+    shortfall_score = 1.0 / (1.0 + max(0.0, median_risk_shortfall) / 10.0)
+    stop_score = stop_distance_profile_score(median_stop_distance_points)
+    spam_penalty = min(1.0, max(0.0, (total_candidates - baseline) / baseline))
+    return {
+        "feasibility_percentage": 0.45 * max(0.0, min(1.0, feasible_percentage)),
+        "capped_feasible_count": 0.10 * feasible_count_score,
+        "buy_sell_balance": 0.15 * balance_score,
+        "lower_risk_shortfall": 0.15 * shortfall_score,
+        "reasonable_stop_distance": 0.10 * stop_score,
+        "risk_gated_bonus": 0.05 if risk_gated else 0.0,
+        "candidate_spam_penalty": -0.15 * spam_penalty,
+    }
+
+
+def buy_sell_balance_score(buy_count: int, sell_count: int) -> float:
+    total = buy_count + sell_count
+    if total <= 0:
+        return 0.0
+    return 1.0 - (abs(buy_count - sell_count) / total)
+
+
+def stop_distance_profile_score(median_stop_distance_points: float | None) -> float:
+    if median_stop_distance_points is None or median_stop_distance_points <= 0:
+        return 0.0
+    ideal_low = 500.0
+    ideal_high = 2_500.0
+    if ideal_low <= median_stop_distance_points <= ideal_high:
+        return 1.0
+    if median_stop_distance_points < ideal_low:
+        return max(0.0, median_stop_distance_points / ideal_low)
+    return max(0.0, ideal_high / median_stop_distance_points)
+
+
+def fixed_budget_scenario(row: Mapping[str, Any], risk_budget: float) -> Mapping[str, Any] | None:
+    minimum_lot = row.get("minimum_lot_feasibility", {})
+    if not isinstance(minimum_lot, Mapping):
+        return None
+    frontier = minimum_lot.get("risk_budget_frontier", {})
+    if not isinstance(frontier, Mapping):
+        return None
+    for scenario in frontier.get("fixed_risk_budget_scenarios", []):
+        if isinstance(scenario, Mapping) and numeric_or_none(scenario.get("fixed_risk_budget")) == risk_budget:
+            return scenario
+    return None
 
 
 def numeric_values(records: list[dict[str, Any]], key: str) -> list[float]:
