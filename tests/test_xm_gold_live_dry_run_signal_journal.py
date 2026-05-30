@@ -40,6 +40,34 @@ def test_once_writes_one_journal(tmp_path):
     assert json.loads(journals[0].read_text(encoding="utf-8"))["orders_sent"] == 0
 
 
+def test_new_journal_includes_read_only_observability_diagnostics(tmp_path):
+    event = observe_once(args(tmp_path), client_factory=FakeMT5Client, journal_dir=tmp_path)
+
+    diagnostics = event["diagnostics"]
+    signal_diag = diagnostics["signal"]
+    feasibility = diagnostics["feasibility"]
+
+    assert signal_diag["fast_sma"] is not None
+    assert signal_diag["slow_sma"] is not None
+    assert signal_diag["previous_fast_sma"] is not None
+    assert signal_diag["previous_slow_sma"] is not None
+    assert signal_diag["sma_crossover_state"] in {"CROSSED_UP", "CROSSED_DOWN", "NO_CROSSOVER"}
+    assert signal_diag["atr"] is not None
+    assert signal_diag["stop_distance"] is not None
+    assert signal_diag["stop_distance_points"] is not None
+    assert "failed_pre_signal_rule_names" in signal_diag
+    assert "computed_lot" in feasibility
+    assert "normalized_lot" in feasibility
+    assert feasibility["broker_volume_min"] == 0.01
+    assert feasibility["broker_volume_step"] == 0.01
+    assert abs(feasibility["spread_points"] - 20.0) < 1e-6
+    assert feasibility["max_allowed_spread_points"] == 350.0
+    assert "failed_feasibility_rule_names" in feasibility
+    assert event["orders_sent"] == 0
+    assert event["order_check_called"] is False
+    assert event["order_send_called"] is False
+
+
 def test_loop_respects_max_iterations(tmp_path):
     loop_args = args(tmp_path, loop=True, max_iterations=3)
     payload = run_loop(

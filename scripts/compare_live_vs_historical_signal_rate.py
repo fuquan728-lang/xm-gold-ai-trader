@@ -183,8 +183,11 @@ def historical_summary(report: Mapping[str, Any]) -> dict[str, Any]:
 def live_summary(payloads: list[Mapping[str, Any]]) -> dict[str, Any]:
     unique = unique_closed_bar_observations(payloads)
     actual_signals = [payload for payload in unique if is_actionable_live_signal(payload)]
+    candidate_signals = [payload for payload in unique if is_candidate_live_signal(payload)]
     buy_count = sum(1 for payload in actual_signals if signal_side(payload) == "BUY")
     sell_count = sum(1 for payload in actual_signals if signal_side(payload) == "SELL")
+    candidate_buy_count = sum(1 for payload in candidate_signals if signal_side(payload) == "BUY")
+    candidate_sell_count = sum(1 for payload in candidate_signals if signal_side(payload) == "SELL")
     observed_order_check_calls = sum(1 for payload in payloads if bool(payload.get("order_check_called")))
     observed_order_send_calls = sum(1 for payload in payloads if bool(payload.get("order_send_called")))
     observed_orders_sent_sum = sum(int(payload.get("orders_sent") or 0) for payload in payloads)
@@ -195,6 +198,10 @@ def live_summary(payloads: list[Mapping[str, Any]]) -> dict[str, Any]:
         "live_actionable_signal_rate": len(actual_signals) / live_bars if live_bars else 0.0,
         "live_buy_signal_count": buy_count,
         "live_sell_signal_count": sell_count,
+        "candidate_live_signals": len(candidate_signals),
+        "live_candidate_signal_rate": len(candidate_signals) / live_bars if live_bars else 0.0,
+        "candidate_live_buy_signal_count": candidate_buy_count,
+        "candidate_live_sell_signal_count": candidate_sell_count,
         "observed_orders_sent_sum": observed_orders_sent_sum,
         "observed_order_check_called_count": observed_order_check_calls,
         "observed_order_send_called_count": observed_order_send_calls,
@@ -300,7 +307,11 @@ def expectation_payload(
 
 
 def is_actionable_live_signal(payload: Mapping[str, Any]) -> bool:
-    return payload.get("final_decision") == "SIGNAL" or signal_side(payload) in {"BUY", "SELL"}
+    return payload.get("final_decision") == "SIGNAL"
+
+
+def is_candidate_live_signal(payload: Mapping[str, Any]) -> bool:
+    return signal_side(payload) in {"BUY", "SELL"}
 
 
 def signal_side(payload: Mapping[str, Any]) -> str | None:

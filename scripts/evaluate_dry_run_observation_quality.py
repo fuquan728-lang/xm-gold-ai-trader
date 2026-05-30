@@ -89,11 +89,15 @@ def evaluate_observation_quality(
 
     spreads = [spread for spread in (numeric_or_none(payload.get("current_spread_points")) for payload in unique_observations) if spread is not None]
     session_breakdown = build_session_breakdown(unique_observations)
-    buy_signal_count = count_signal_side(unique_observations, "BUY")
-    sell_signal_count = count_signal_side(unique_observations, "SELL")
+    buy_signal_count = count_final_signal_side(unique_observations, "BUY")
+    sell_signal_count = count_final_signal_side(unique_observations, "SELL")
+    candidate_buy_signal_count = count_candidate_signal_side(unique_observations, "BUY")
+    candidate_sell_signal_count = count_candidate_signal_side(unique_observations, "SELL")
     actionable_count = buy_signal_count + sell_signal_count
+    candidate_signal_count = candidate_buy_signal_count + candidate_sell_signal_count
     total_observations = len(unique_observations)
     actionable_signal_rate = actionable_count / total_observations if total_observations else 0.0
+    candidate_signal_rate = candidate_signal_count / total_observations if total_observations else 0.0
     risk_lot_below_min_count = count_code(unique_observations, REASON_LOT_BELOW_VOLUME_MIN)
     spread_too_high_count = count_code(unique_observations, REASON_MAX_SPREAD_EXCEEDED)
 
@@ -159,6 +163,10 @@ def evaluate_observation_quality(
         "session_breakdown": session_breakdown,
         "buy_signal_count": buy_signal_count,
         "sell_signal_count": sell_signal_count,
+        "candidate_signal_count": candidate_signal_count,
+        "candidate_signal_rate": candidate_signal_rate,
+        "candidate_buy_signal_count": candidate_buy_signal_count,
+        "candidate_sell_signal_count": candidate_sell_signal_count,
         "risk_lot_below_min_count": risk_lot_below_min_count,
         "spread_too_high_count": spread_too_high_count,
         "orders_sent": orders_sent,
@@ -313,8 +321,10 @@ def build_session_breakdown(payloads: list[Mapping[str, Any]]) -> dict[str, dict
         breakdown[session]["observations"] += 1
         breakdown[session]["signals"] += 1 if final_decision == "SIGNAL" else 0
         breakdown[session]["blocks"] += 1 if final_decision == "BLOCK" else 0
-        breakdown[session]["buy_signals"] += 1 if side == "BUY" else 0
-        breakdown[session]["sell_signals"] += 1 if side == "SELL" else 0
+        breakdown[session]["buy_signals"] += 1 if final_decision == "SIGNAL" and side == "BUY" else 0
+        breakdown[session]["sell_signals"] += 1 if final_decision == "SIGNAL" and side == "SELL" else 0
+        breakdown[session]["candidate_buy_signals"] += 1 if side == "BUY" else 0
+        breakdown[session]["candidate_sell_signals"] += 1 if side == "SELL" else 0
         breakdown[session]["reason_code_counts"].update(codes)
     return {
         name: {
@@ -323,6 +333,8 @@ def build_session_breakdown(payloads: list[Mapping[str, Any]]) -> dict[str, dict
             "blocks": values["blocks"],
             "buy_signals": values["buy_signals"],
             "sell_signals": values["sell_signals"],
+            "candidate_buy_signals": values["candidate_buy_signals"],
+            "candidate_sell_signals": values["candidate_sell_signals"],
             "reason_code_counts": dict(sorted(values["reason_code_counts"].items())),
         }
         for name, values in breakdown.items()
@@ -336,17 +348,30 @@ def empty_session() -> dict[str, Any]:
         "blocks": 0,
         "buy_signals": 0,
         "sell_signals": 0,
+        "candidate_buy_signals": 0,
+        "candidate_sell_signals": 0,
         "reason_code_counts": Counter(),
     }
 
 
-def count_signal_side(payloads: list[Mapping[str, Any]], side: str) -> int:
+def count_final_signal_side(payloads: list[Mapping[str, Any]], side: str) -> int:
+    return sum(1 for payload in payloads if payload.get("final_decision") == "SIGNAL" and signal_side(payload) == side)
+
+
+def count_candidate_signal_side(payloads: list[Mapping[str, Any]], side: str) -> int:
     count = 0
     for payload in payloads:
-        signal = payload.get("signal")
-        if isinstance(signal, Mapping) and signal.get("side") == side:
+        if signal_side(payload) == side:
             count += 1
     return count
+
+
+def signal_side(payload: Mapping[str, Any]) -> str | None:
+    signal = payload.get("signal")
+    if isinstance(signal, Mapping):
+        side = signal.get("side")
+        return str(side) if side is not None else None
+    return None
 
 
 def count_code(payloads: list[Mapping[str, Any]], code: str) -> int:

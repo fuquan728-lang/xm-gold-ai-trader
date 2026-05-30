@@ -88,6 +88,23 @@ def test_comparison_report_never_reports_order_check_or_order_send():
     assert report["live_sample_coverage"]["sufficient_closed_bar_coverage"] is True
 
 
+def test_rejected_candidate_is_not_counted_as_actual_live_signal():
+    payload = live_payloads(total=1, signals=0)[0]
+    payload["signal"] = {"side": "BUY"}
+    payload["reason_codes"] = ["LOT_BELOW_VOLUME_MIN"]
+
+    report = compare_live_vs_historical(
+        historical_report=historical_report(rate=0.0314, signals=157, total=5_000),
+        live_payloads=[payload],
+        min_live_bars=1,
+    )
+
+    assert report["actual_live_signals"] == 0
+    assert report["live_actionable_signal_rate"] == 0.0
+    assert report["live_summary"]["candidate_live_signals"] == 1
+    assert report["live_summary"]["live_candidate_signal_rate"] == 1.0
+
+
 def historical_report(*, rate: float, signals: int, total: int) -> dict:
     return {
         "project": "xm-gold-ai-trader",

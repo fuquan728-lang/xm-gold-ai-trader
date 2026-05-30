@@ -11,6 +11,7 @@ from scripts.evaluate_dry_run_observation_quality import (
     REASON_ORDERS_SENT_NONZERO,
     REASON_TOO_MANY_MALFORMED_JOURNALS,
     REASON_UNIQUE_CLOSED_BARS_BELOW_MINIMUM,
+    REASON_ZERO_ACTIONABLE_SIGNAL_RATE,
     evaluate_observation_quality,
 )
 
@@ -93,6 +94,25 @@ def test_passes_clean_observation_set(tmp_path):
     assert report["unique_closed_bars"] == 3
     assert report["live_sample_coverage"]["sufficient_closed_bar_coverage"] is True
     assert report["live_sample_coverage"]["warn_reason_codes"] == []
+
+
+def test_rejected_candidate_does_not_clear_zero_actionable_signal_warn(tmp_path):
+    write_observation(
+        tmp_path,
+        "candidate-blocked.json",
+        final_decision="BLOCK",
+        side="BUY",
+        reason_codes=["LOT_BELOW_VOLUME_MIN"],
+    )
+
+    report = evaluate(tmp_path, min_unique_bars=1)
+
+    assert report["final_decision"] == "WARN"
+    assert REASON_ZERO_ACTIONABLE_SIGNAL_RATE in report["reason_codes"]
+    assert report["actionable_signal_rate"] == 0.0
+    assert report["buy_signal_count"] == 0
+    assert report["candidate_signal_count"] == 1
+    assert report["candidate_buy_signal_count"] == 1
 
 
 def test_handles_malformed_journals_safely(tmp_path):

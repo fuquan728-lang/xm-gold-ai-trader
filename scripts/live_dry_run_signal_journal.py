@@ -377,6 +377,15 @@ def build_event(
         "selected_parameters_source": parameter_source,
         "signal": asdict(signal) if signal is not None else None,
         "risk_preview": risk_preview_payload(risk_decision, current_spread, config.risk.max_spread_points),
+        "diagnostics": diagnostics_payload(
+            bars=bars,
+            signal_config=signal_config,
+            signal=signal,
+            risk_decision=risk_decision,
+            symbol_info=symbol_info,
+            current_spread=current_spread,
+            max_spread_points=config.risk.max_spread_points,
+        ),
         "current_spread_points": current_spread,
         "open_positions_count": open_positions_count,
         "config": {
@@ -422,6 +431,174 @@ def risk_preview_payload(
     else:
         payload["lot_below_minimum"] = False
     return payload
+
+
+def diagnostics_payload(
+    *,
+    bars: Any | None,
+    signal_config: BaselineSignalConfig,
+    signal: TradeSignal | None,
+    risk_decision: RiskDecision | None,
+    symbol_info: dict[str, Any] | None,
+    current_spread: float | None,
+    max_spread_points: float,
+) -> dict[str, Any]:
+    signal_diagnostics = signal_indicator_diagnostics(bars, signal_config, signal, symbol_info)
+    feasibility = feasibility_diagnostics(
+        risk_decision=risk_decision,
+        symbol_info=symbol_info,
+        current_spread=current_spread,
+        max_spread_points=max_spread_points,
+        signal=signal,
+    )
+    return {
+        "schema_version": 1,
+        "signal": signal_diagnostics,
+        "feasibility": feasibility,
+        "failed_pre_signal_rule_names": signal_diagnostics["failed_pre_signal_rule_names"],
+        "failed_feasibility_rule_names": feasibility["failed_feasibility_rule_names"],
+    }
+
+
+def signal_indicator_diagnostics(
+    bars: Any | None,
+    config: BaselineSignalConfig,
+    signal: TradeSignal | None,
+    symbol_info: dict[str, Any] | None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "fast_sma": None,
+        "slow_sma": None,
+        "previous_fast_sma": None,
+        "previous_slow_sma": None,
+        "sma_crossover_state": "NOT_EVALUATED",
+        "atr": None,
+        "stop_distance": None,
+        "stop_distance_points": None,
+        "failed_pre_signal_rule_names": [],
+        "indicator_source": "not_available",
+    }
+    if bars is None or len(bars) == 0:
+        payload["failed_pre_signal_rule_names"] = ["NO_RECENT_BARS"]
+        return payload
+
+    minimum_bars = max(config.slow_sma, config.atr_period) + 2
+    if len(bars) < minimum_bars:
+        payload["sma_crossover_state"] = "NOT_ENOUGH_BARS"
+        payload["failed_pre_signal_rule_names"] = ["INSUFFICIENT_BARS_FOR_BASELINE"]
+        return payload
+
+    frame = bars.copy()
+    frame["fast_sma"] = frame["close"].rolling(config.fast_sma).mean()
+    frame["slow_sma"] = frame["close"].rolling(config.slow_sma).mean()
+    frame["atr"] = average_true_range(frame, config.atr_period)
+
+    previous = frame.iloc[-2]
+    latest = frame.iloc[-1]
+    fast = none_if_nan(latest["fast_sma"])
+    slow = none_if_nan(latest["slow_sma"])
+    previous_fast = none_if_nan(previous["fast_sma"])
+    previous_slow = none_if_nan(previous["slow_sma"])
+    atr = none_if_nan(latest["atr"])
+    payload.update(
+        {
+            "fast_sma": fast,
+            "slow_sma": slow,
+            "previous_fast_sma": previous_fast,
+            "previous_slow_sma": previous_slow,
+            "atr": atr,
+            "indicator_source": "computed_from_journal_bars",
+        }
+    )
+
+    if None in {fast, slow, previous_fast, previous_slow, atr}:
+        payload["sma_crossover_state"] = "INDICATOR_WARMUP"
+        payload["failed_pre_signal_rule_names"] = ["INDICATOR_WARMUP"]
+        return payload
+
+    crossed_up = previous_fast <= previous_slow and fast > slow
+    crossed_down = previous_fast >= previous_slow and fast < slow
+    if crossed_up:
+        payload["sma_crossover_state"] = "CROSSED_UP"
+    elif crossed_down:
+        payload["sma_crossover_state"] = "CROSSED_DOWN"
+    else:
+        payload["sma_crossover_state"] = "NO_CROSSOVER"
+        payload["failed_pre_signal_rule_names"] = ["SMA_CROSSOVER_NOT_PRESENT"]
+
+    point = symbol_point(symbol_info)
+    if signal is not None and signal.entry_price is not None and signal.stop_loss_price is not None:
+        stop_distance = abs(float(signal.entry_price) - float(signal.stop_loss_price))
+        payload["stop_distance"] = stop_distance
+        payload["stop_distance_points"] = stop_distance / point if point else None
+    elif atr is not None:
+        stop_distance = float(atr) * config.atr_stop_multiplier
+        payload["stop_distance"] = stop_distance
+        payload["stop_distance_points"] = stop_distance / point if point else None
+    return payload
+
+
+def symbol_point(symbol_info: dict[str, Any] | None) -> float | None:
+    if not symbol_info:
+        return None
+    try:
+        point = float(symbol_info.get("point"))
+    except (TypeError, ValueError):
+        return None
+    return point if point > 0 else None
+
+
+def feasibility_diagnostics(
+    *,
+    risk_decision: RiskDecision | None,
+    symbol_info: dict[str, Any] | None,
+    current_spread: float | None,
+    max_spread_points: float,
+    signal: TradeSignal | None,
+) -> dict[str, Any]:
+    risk_amount = risk_decision.risk_amount if risk_decision is not None else 0.0
+    risk_per_lot = risk_decision.risk_per_lot if risk_decision is not None else 0.0
+    computed_lot = risk_amount / risk_per_lot if risk_per_lot > 0 else None
+    point = float(symbol_info.get("point")) if symbol_info and symbol_info.get("point") is not None else None
+    stop_distance_points = risk_decision.stop_distance_points if risk_decision is not None else None
+    if stop_distance_points is None and signal is not None and point and signal.entry_price is not None and signal.stop_loss_price is not None:
+        stop_distance_points = abs(float(signal.entry_price) - float(signal.stop_loss_price)) / point
+
+    failed_rules: list[str] = []
+    if current_spread is not None and current_spread > max_spread_points:
+        failed_rules.append(REASON_MAX_SPREAD_EXCEEDED)
+    if risk_decision is not None and not risk_decision.allowed:
+        failed_rules.extend(str(code) for code in risk_decision.reason_codes)
+
+    return {
+        "computed_lot": computed_lot,
+        "normalized_lot": risk_decision.volume if risk_decision is not None else 0.0,
+        "broker_volume_min": symbol_info.get("volume_min") if symbol_info else None,
+        "broker_volume_step": symbol_info.get("volume_step") if symbol_info else None,
+        "broker_volume_max": symbol_info.get("volume_max") if symbol_info else None,
+        "spread_points": current_spread,
+        "max_allowed_spread_points": max_spread_points,
+        "spread_allowed": None if current_spread is None else current_spread <= max_spread_points,
+        "stop_distance_points": stop_distance_points,
+        "take_profit_distance_points": risk_decision.take_profit_distance_points if risk_decision is not None else None,
+        "risk_amount": risk_amount,
+        "risk_per_lot": risk_per_lot,
+        "failed_feasibility_rule_names": sorted(set(failed_rules)),
+    }
+
+
+def average_true_range(frame: Any, period: int) -> Any:
+    previous_close = frame["close"].shift(1)
+    true_range = frame[["high", "low"]].assign(
+        high_close=(frame["high"] - previous_close).abs(),
+        low_close=(frame["low"] - previous_close).abs(),
+        high_low=frame["high"] - frame["low"],
+    )[["high_close", "low_close", "high_low"]].max(axis=1)
+    return true_range.rolling(period).mean()
+
+
+def none_if_nan(value: Any) -> float | None:
+    return None if value != value else float(value)
 
 
 def selected_signal_config(args: argparse.Namespace) -> tuple[BaselineSignalConfig, str]:
