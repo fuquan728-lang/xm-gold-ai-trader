@@ -47,6 +47,10 @@ from core.trading_recorder import get_trading_recorder
 from core.observation_journal import get_m5_observation_journal
 from core.mql5_data import get_mql5_data_manager
 from core.service.monitor import ServiceMonitor
+from core.service.communication import (
+    FileModeRunner, SocketModeRunner, WebSocketModeRunner,
+    AISocketHandler, ThreadedTCPServer, parse_socket_payload,
+)
 from core import config
 
 try:
@@ -83,21 +87,8 @@ mode_manager_instance = None
 PROTOCOL_VERSION = "v0.25.7"
 
 
-def parse_socket_payload(data: str) -> Tuple[str, Optional[Dict[str, Any]]]:
-    """Classify a socket payload without matching TEST inside JSON values."""
-    text = data.strip().strip("\x00")
-    json_start = text.find("{")
-    json_end = text.rfind("}")
-    if json_start >= 0 and json_end > json_start:
-        return "json", json.loads(text[json_start:json_end + 1])
-
-    command = text.upper()
-    if command == "TEST":
-        return "test", None
-    if command == "HEALTHCHECK":
-        return "healthcheck", None
-
-    return "json", json.loads(text)
+# parse_socket_payload / AISocketHandler / ThreadedTCPServer
+# 已迁移到 core/service/communication.py，通过 import 使用
 
 
 _INDICATOR_FINGERPRINT_KEYS = ("rsi", "macd_main", "macd_signal", "ema50", "atr")
@@ -219,145 +210,7 @@ _BLOCKING_RISK_KEYWORDS = (
 )
 
 
-# ==================== Socket处理器 - 简化但高可靠版本 ====================
-class AISocketHandler(socketserver.BaseRequestHandler):
-    """AI Socket请求处理器 - 极度简化但高可靠版本"""
-    
-    def __init__(self, request, client_address, server):
-        # 直接调用同模块函数，无需自引用导入
-        self.ai_service = get_ai_service()
-        super().__init__(request, client_address, server)
-    
-    def handle(self):
-        """高可靠的请求处理"""
-        client_ip = self.client_address[0]
-        client_port = self.client_address[1]
-        result = None
-        start_time = time.time()
-        
-        try:
-            self.request.settimeout(10.0)
-            logger.info(f"📥 [Socket] 连接来自 {client_ip}:{client_port}")
-            
-            # 1. 接收数据
-            raw_data = b''
-            try:
-                while True:
-                    chunk = self.request.recv(4096)
-                    if not chunk:
-                        break
-                    raw_data += chunk
-                    if b'\n' in raw_data:
-                        break
-            except socket.timeout:
-                pass
-            
-            if not raw_data:
-                logger.warning("[WARN]  收到空数据")
-                result = {"action": "HOLD", "confidence": 0.65, "reason": "安全回退: 空请求，默认HOLD", "use_deepseek": False, "cached": False}
-            else:
-                # 2. 解码和清理
-                data = raw_data.decode('utf-8', errors='ignore').strip()
-                logger.info(f"[TEST] 收到原始数据 (hex): {raw_data.hex()}")
-                logger.info(f"[TEST] 收到数据: {data[:200]}...")
-                
-                # 3. 测试消息和健康检查处理
-                try:
-                    payload_type, request_data = parse_socket_payload(data)
-                except json.JSONDecodeError as json_e:
-                    logger.error(f"[ERR] JSON瑙ｆ瀽澶辫触: {json_e}")
-                    logger.error(f"   鍘熷鏁版嵁: {data[:200]}")
-                    result = {"error": str(json_e), "action": "HOLD", "confidence": 0.65, "use_deepseek": False, "reason": "瀹夊叏鍥為€€: JSON瑙ｆ瀽澶辫触", "cached": False}
-                    payload_type, request_data = "invalid", None
-                if payload_type == "test":
-                    logger.info("🧪 收到测试消息")
-                    result = {"status": "ok", "message": "Server ready"}
-                elif payload_type == "healthcheck":
-                    logger.info("🏥 收到健康检查请求")
-                    # 返回完整的服务状态信息
-                    result = {
-                        "status": "ok",
-                        "message": "Service health check",
-                        "service_status": service_status,
-                        "timestamp": datetime.now().isoformat(),
-                        "socket_available": service_status.get("socket_available", False),
-                        "current_mode": service_status.get("current_mode", "unknown"),
-                        "uptime_seconds": (datetime.now() - service_status.get("start_time", datetime.now())).total_seconds() if "start_time" in service_status else 0
-                    }
-                elif payload_type == "json":
-                    # 4. JSON解析
-                    try:
-                        json_start = data.find('{')
-                        json_end = data.rfind('}')
-                        if json_start >= 0 and json_end > json_start:
-                            json_str = data[json_start:json_end+1]
-                            request_data = json.loads(json_str)
-                        else:
-                            request_data = json.loads(data)
-                        
-                        # 5. 检查是否是 MQL5 数据更新请求
-                        if "type" in request_data and request_data["type"] == "mql5_data":
-                            logger.info("[DATA] 收到 MQL5 数据更新")
-                            try:
-                                mql5_manager = get_mql5_data_manager()
-                                success = mql5_manager.update_from_json(request_data)
-                                result = {
-                                    "status": "ok" if success else "error",
-                                    "message": "数据更新成功" if success else "数据更新失败"
-                                }
-                            except Exception as e:
-                                logger.error(f"更新 MQL5 数据异常: {e}")
-                                result = {"status": "error", "message": str(e)}
-                        else:
-                            # 6. 处理普通 AI 请求
-                            logger.info(f"📥 处理请求: {request_data.get('symbol', 'UNKNOWN')}")
-                            try:
-                                result = self.ai_service.process_request(request_data)
-                                if not result:
-                                    result = {"action": "HOLD", "confidence": 0.65, "reason": "安全回退: 处理返回空", "use_deepseek": False, "cached": False}
-                            except Exception as proc_e:
-                                logger.warning(f"[WARN]  处理异常: {proc_e}")
-                                result = {"action": "HOLD", "confidence": 0.65, "reason": f"安全回退: {str(proc_e)}", "use_deepseek": False, "cached": False}
-                    
-                    except json.JSONDecodeError as json_e:
-                        logger.error(f"[ERR] JSON解析失败: {json_e}")
-                        logger.error(f"   原始数据: {data[:200]}")
-                        result = {"error": str(json_e), "action": "HOLD", "confidence": 0.65, "use_deepseek": False, "reason": "安全回退: JSON解析失败", "cached": False}
-            
-            # 6. 确保结果有效
-            if not result:
-                result = {"action": "HOLD", "confidence": 0.0, "reason": "无结果", "use_deepseek": False, "cached": False}
-            
-            # 7. 发送响应
-            response_str = json.dumps(result, ensure_ascii=False) + "\n"
-            response_bytes = response_str.encode('utf-8')
-            
-            logger.info(f"📤 发送响应: {len(response_bytes)} 字节")
-            self.request.sendall(response_bytes)
-            logger.info(f"[OK] 响应发送成功")
-            
-            # 8. 记录结果
-            action = result.get('action', 'UNKNOWN')
-            conf = result.get('confidence', 0.0)
-            elapsed = time.time() - start_time
-            logger.info(f"📤 [Socket] 响应: {action} (置信度: {conf:.2f}, 用时: {elapsed:.3f}s)")
-            
-        except Exception as e:
-            logger.error(f"[ERR] handle异常: {e}")
-            logger.error(f"   堆栈: {traceback.format_exc()}")
-            try:
-                error_result = {"error": str(e), "action": "HOLD", "confidence": 0.0, "use_deepseek": False, "reason": "服务器内部错误", "cached": False}
-                self.request.sendall((json.dumps(error_result, ensure_ascii=False) + "\n").encode('utf-8'))
-            except (socket.error, OSError, BrokenPipeError) as send_err:
-                logger.debug(f"[DEBUG] handle错误响应发送失败(客户端可能已断开): {send_err}")
-
-
-class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
-    """支持多线程的TCP服务器"""
-    allow_reuse_address = True
-    daemon_threads = True
-    request_queue_size = config.MAX_CONCURRENT_CONNECTIONS if hasattr(config, 'MAX_CONCURRENT_CONNECTIONS') else 10
-
+# AISocketHandler / ThreadedTCPServer 已迁移到 core/service/communication.py
 
 # ==================== 主服务类 ====================
 class MT5AITradingService:
@@ -369,11 +222,11 @@ class MT5AITradingService:
         self.validator = DataValidator()
         self.indicator_analyzer = IndicatorAnalyzer()
         self.mode = "auto"
-        self.socket_server = None
-        self.socket_thread = None
-        self.file_thread = None
-        self.websocket_handler = None
-        self.websocket_thread = None
+        
+        # 通信 Runner（Phase 2 拆分，替代旧 socket_server/socket_thread/file_thread/websocket_handler/websocket_thread）
+        self.socket_server = None   # 兼容性保留
+        self.websocket_handler = None  # 兼容性保留
+        
         self.web_dashboard = None
         
         # 权重优化器
@@ -399,6 +252,23 @@ class MT5AITradingService:
             web_dashboard=None,  # 在 run() 中设置
             observation_journal=self.observation_journal,
             current_mode_getter=lambda: _get_service_status("current_mode", "auto"),
+        )
+        
+        # 通信模块 (Phase 2: Communication Runners)
+        self.file_runner = FileModeRunner(
+            process_request_func=self.process_request,
+            file_handler=file_handler,
+            local_instance=self.local_instance,
+            observation_journal=self.observation_journal,
+            running_getter=lambda: self.running,
+        )
+        self.socket_runner = SocketModeRunner(
+            process_request_func=self.process_request,
+            running_getter=lambda: self.running,
+        )
+        self.ws_runner = WebSocketModeRunner(
+            process_request_func=self.process_request,
+            running_getter=lambda: self.running,
         )
         
         # 风险管理器（可选，依赖numpy/scipy）
@@ -461,17 +331,15 @@ class MT5AITradingService:
             http_client.close()
         except Exception:
             pass
-        if self.socket_server:
-            try:
-                self.socket_server.shutdown()
-                self.socket_server.server_close()
-            except Exception:
-                pass
-        if self.websocket_handler:
-            try:
-                asyncio.run(self.websocket_handler.stop())
-            except Exception:
-                pass
+        # 关闭通信 Runner (Phase 2)
+        try:
+            self.socket_runner.shutdown()
+        except Exception:
+            pass
+        try:
+            asyncio.run(self.ws_runner.stop())
+        except Exception:
+            pass
         logger.info("[OK] 清理完成")
     
     def _print_status(self, force: bool = False):
@@ -1096,158 +964,26 @@ class MT5AITradingService:
         return self.weight_optimizer.adjust_weights(reason)
     
     def _start_socket_mode(self):
-        logger.info(f"🔌 启动Socket服务器 ({config.SOCKET_HOST}:{config.SOCKET_PORT})...")
-        
-        try:
-            # 创建服务器实例
-            self.socket_server = ThreadedTCPServer((config.SOCKET_HOST, config.SOCKET_PORT), AISocketHandler)
-            
-            # 设置服务器超时，防止阻塞
-            self.socket_server.timeout = 1
-            
-            # 启动服务器线程
-            self.socket_thread = threading.Thread(target=self._run_socket_server)
-            self.socket_thread.daemon = True
-            self.socket_thread.start()
-            
-            _update_service_status("socket_available", True)
-            logger.info(f"[OK] Socket服务器已启动，监听 {config.SOCKET_HOST}:{config.SOCKET_PORT}")
-            
-        except Exception as e:
-            logger.error(f"[ERR] 启动Socket服务器失败: {e}")
-            _update_service_status("socket_available", False)
-            raise
+        """委托到 SocketModeRunner（Phase 2），保留兼容性"""
+        self.socket_runner.start()
+        _update_service_status("socket_available", True)
+        # 保持兼容性引用
+        self.socket_server = self.socket_runner.server
     
     def _run_socket_server(self):
-        """运行Socket服务器的主循环"""
-        try:
-            # 使用serve_forever，但设置poll_interval以便可以检查running状态
-            while self.running:
-                try:
-                    self.socket_server.handle_request()
-                except Exception as e:
-                    logger.debug(f"[DEBUG] Socket请求处理异常: {e}")
-                    time.sleep(0.1)
-        except Exception as e:
-            logger.error(f"[ERR] Socket服务器运行异常: {e}")
-        finally:
-            if self.socket_server:
-                try:
-                    self.socket_server.server_close()
-                except Exception as exc:
-                    logger.debug(f"[DEBUG] Socket服务器关闭异常: {exc}")
+        """已迁移到 SocketModeRunner（Phase 2）"""
+        pass
     
     def _start_websocket_mode(self) -> bool:
-        logger.info(f"-> 启动WebSocket服务器 ({config.SOCKET_HOST}:{config.SOCKET_PORT+1})...")
-        
-        try:
-            if not HAS_WEBSOCKETS:
-                raise ImportError("websockets library not installed")
-            
-            self.websocket_handler = WebSocketHandler(
-                host=config.SOCKET_HOST,
-                port=config.SOCKET_PORT + 1,
-                process_request_func=self.process_request
-            )
-            
-            def run_websocket_server():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                
-                async def run():
-                    started = await self.websocket_handler.start()
-                    if not started:
-                        return
-                    
-                    while self.running and self.websocket_handler.running:
-                        await asyncio.sleep(0.1)
-                
-                loop.run_until_complete(run())
-            
-            self.websocket_thread = threading.Thread(target=run_websocket_server)
-            self.websocket_thread.daemon = True
-            self.websocket_thread.start()
-            
-            time.sleep(1.5)
-            
-            if self.websocket_handler.running:
-                logger.info(f"[OK] WebSocket服务器已启动，监听 ws://{config.SOCKET_HOST}:{config.SOCKET_PORT+1}")
-                return True
-            else:
-                logger.error("[ERR] WebSocket服务器启动失败")
-                return False
-            
-        except Exception as e:
-            logger.error(f"[ERR] 启动WebSocket服务器失败: {e}")
-            logger.error(f"   堆栈: {traceback.format_exc()}")
-            return False
+        """委托到 WebSocketModeRunner（Phase 2），保留兼容性"""
+        ok = self.ws_runner.start()
+        # 保持兼容性引用
+        self.websocket_handler = self.ws_runner.handler
+        return ok
     
     def _run_file_mode(self):
-        logger.info("[DIR] 启动文件模式处理器...")
-        
-        while self.running:
-            try:
-                file_handler.update_health_check()
-                mt5_path = file_handler.find_request_file()
-                if mt5_path is None:
-                    time.sleep(0.1)  # 无请求时适当休眠，避免忙等待
-                    continue
-                
-                logger.info(f"[DIR] 找到请求文件，路径: {mt5_path}")
-                file_handler.write_service_ready(mt5_path, self.local_instance.service_id, self.mode, ready=True)
-                
-                request_file = Path(mt5_path) / "ai_request.json"
-                content = file_handler.safe_read(str(request_file))
-                
-                if not content:
-                    logger.info(f"[WARN]  请求文件内容为空")
-                    time.sleep(config.FILE_CHECK_INTERVAL)
-                    continue
-                
-                logger.info(f"📥 收到请求文件内容: {content[:200]}...")
-                
-                try:
-                    request_data = json.loads(content)
-                    request_data["_request_read_at"] = _utc_now_iso()
-                    response_data = self.process_request(request_data)
-                    if response_data:
-                        response_data["response_written_at"] = _utc_now_iso()
-                        logger.info(
-                            "[RESPONSE] protocol=%s request_id=%s action=%s confidence=%s blocked_by=%s",
-                            response_data.get("protocol_version"),
-                            response_data.get("request_id"),
-                            response_data.get("action"),
-                            response_data.get("confidence"),
-                            response_data.get("blocked_by"),
-                        )
-                        logger.info(f"📤 准备写入响应文件，路径: {mt5_path}")
-                        logger.info(f"📤 响应内容: {json.dumps(response_data, ensure_ascii=False)[:200]}...")
-                        
-                        result = file_handler.write_response(response_data, mt5_path)
-                        if getattr(config, "OBSERVATION_JOURNAL_ENABLED", True):
-                            try:
-                                journal = getattr(self, "observation_journal", None)
-                                if journal is not None:
-                                    journal.record(request_data, response_data, response_write_ok=bool(result))
-                            except Exception as journal_error:
-                                logger.warning(f"[OBS] observation journal write skipped: {journal_error}")
-                         
-                        if result:
-                            logger.info(f"[OK] 响应文件写入成功")
-                        else:
-                            logger.error(f"[ERR] 响应文件写入失败")
-                
-                except json.JSONDecodeError as e:
-                    logger.error(f"[ERR] JSON解析失败: {e}, 原始数据: {content[:100]}")
-                except Exception as e:
-                    logger.error(f"[ERR] 处理请求异常: {e}, 文件: {request_file}")
-                    logger.error(f"   堆栈: {traceback.format_exc()}")
-                finally:
-                    time.sleep(config.FILE_CHECK_INTERVAL)
-            
-            except Exception as e:
-                logger.error(f"[ERR] 文件模式循环错误: {e}")
-                time.sleep(0.1)
+        """委托到 FileModeRunner（Phase 2）"""
+        self.file_runner.run()
     
     def run(self, mode: str = "auto"):
         self.running = True
