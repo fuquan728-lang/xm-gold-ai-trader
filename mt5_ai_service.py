@@ -23,6 +23,8 @@ import socketserver
 import threading
 import os
 import asyncio
+import traceback
+import glob as _glob_module
 from datetime import datetime
 from typing import Dict, Any, Optional, Union, Tuple
 from pathlib import Path
@@ -42,7 +44,9 @@ from core.websocket_handler import WebSocketHandler, HAS_WEBSOCKETS
 from core.web_dashboard import WebDashboard
 from core.ha import get_service_registry, create_local_service_instance, ServiceStatus
 from core.trading_recorder import get_trading_recorder
+from core.observation_journal import get_m5_observation_journal
 from core.mql5_data import get_mql5_data_manager
+from core.service.monitor import ServiceMonitor
 from core import config
 
 try:
@@ -54,6 +58,18 @@ except ImportError as e:
 
 
 # ==================== 全局状态 ====================
+_service_status_lock = threading.Lock()
+
+def _update_service_status(key: str, value):
+    """线程安全的状态更新"""
+    with _service_status_lock:
+        service_status[key] = value
+
+def _get_service_status(key: str, default=None):
+    """线程安全的状态读取（简单类型无需加锁，字典修改需加锁）"""
+    with _service_status_lock:
+        return service_status.get(key, default)
+
 service_status = {
     "running": True,
     "current_mode": "auto",
@@ -64,6 +80,143 @@ service_status = {
 }
 
 mode_manager_instance = None
+PROTOCOL_VERSION = "v0.25.7"
+
+
+def parse_socket_payload(data: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """Classify a socket payload without matching TEST inside JSON values."""
+    text = data.strip().strip("\x00")
+    json_start = text.find("{")
+    json_end = text.rfind("}")
+    if json_start >= 0 and json_end > json_start:
+        return "json", json.loads(text[json_start:json_end + 1])
+
+    command = text.upper()
+    if command == "TEST":
+        return "test", None
+    if command == "HEALTHCHECK":
+        return "healthcheck", None
+
+    return "json", json.loads(text)
+
+
+_INDICATOR_FINGERPRINT_KEYS = ("rsi", "macd_main", "macd_signal", "ema50", "atr")
+
+
+def build_indicator_fingerprint(indicators: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Build a compact fingerprint so cached signals cannot cross indicator states."""
+    if not indicators:
+        return None
+
+    parts = []
+    for key in _INDICATOR_FINGERPRINT_KEYS:
+        if key not in indicators:
+            continue
+        try:
+            parts.append(f"{key}:{float(indicators[key]):.4f}")
+        except (TypeError, ValueError):
+            parts.append(f"{key}:{indicators[key]}")
+    return "|".join(parts) if parts else None
+
+
+def append_local_reason(ai_reason: str, local_reason: str) -> str:
+    if not local_reason:
+        return ai_reason
+    if not ai_reason:
+        return f"本地指标校验: {local_reason}"
+    combined = f"{ai_reason} | 本地指标校验: {local_reason}"
+    return combined[:240]
+
+
+def _utc_now_iso() -> str:
+    return datetime.now().isoformat()
+
+
+def _latency_ms(start_iso: Optional[str], end_iso: Optional[str] = None) -> Optional[int]:
+    if not start_iso:
+        return None
+    try:
+        start = datetime.fromisoformat(str(start_iso))
+        end = datetime.fromisoformat(str(end_iso)) if end_iso else datetime.now()
+        return max(0, int((end - start).total_seconds() * 1000))
+    except Exception:
+        return None
+
+
+def _total_latency_ms(request_created_at: Optional[str], request_read_at: Optional[str], end_iso: str) -> Optional[int]:
+    read_latency = _latency_ms(request_read_at, end_iso)
+    created_latency = _latency_ms(request_created_at, end_iso)
+    if read_latency is None:
+        return created_latency
+    if created_latency is None:
+        return read_latency
+    if created_latency > read_latency + 300_000:
+        return read_latency
+    return created_latency
+
+
+def _build_protocol_response(
+    payload: Dict[str, Any],
+    request_id: str = "",
+    response_matched: Optional[bool] = None,
+    stale_response: Optional[bool] = False,
+) -> Dict[str, Any]:
+    response: Dict[str, Any] = {
+        "protocol_version": PROTOCOL_VERSION,
+        "request_id": str(request_id or ""),
+    }
+    for key, value in payload.items():
+        if key in ("protocol_version", "request_id"):
+            continue
+        response[key] = value
+    response.setdefault("stale_response_guard", True)
+    response.setdefault("request_id_required", True)
+    if response_matched is not None:
+        response["response_matched"] = bool(response_matched)
+    if stale_response is not None:
+        response["stale_response"] = bool(stale_response)
+    return response
+
+
+def _derive_blocked_by(result: Dict[str, Any]) -> list:
+    blocked = []
+    if not isinstance(result, dict):
+        return blocked
+
+    if result.get("action") != "HOLD":
+        return blocked
+
+    blocked.append("ACTION_HOLD")
+    reason = str(result.get("reason", ""))
+    validation = result.get("indicator_validation")
+    if isinstance(validation, dict):
+        blocks = validation.get("blocks") or []
+        if any("pips>" in str(block) for block in blocks):
+            blocked.append("SPREAD_TOO_HIGH")
+        if validation.get("original_action") in ("BUY", "SELL") and validation.get("adjusted"):
+            blocked.append("INDICATOR_QUALITY_GATE")
+
+    confidence = result.get("original_confidence", result.get("confidence", 0.0))
+    try:
+        if float(confidence) < float(config.MIN_CONFIDENCE):
+            blocked.append("LOW_CONFIDENCE")
+    except Exception:
+        pass
+
+    if "DeepSeek" in reason or "AI" in reason:
+        if "不可用" in reason or "失败" in reason or "disabled" in reason.lower():
+            blocked.append("AI_UNAVAILABLE")
+    if result.get("risk_downgrade_reason"):
+        blocked.append("RISK_DOWNGRADE")
+
+    return list(dict.fromkeys(blocked))
+
+# 阻断性风险关键词（模块级常量，避免重复构造）
+_BLOCKING_RISK_KEYWORDS = (
+    "保证金不足", "无法开仓", "保证金追缴", "立即平仓",
+    "账户不允许", "交易被禁用", "风险评估失败",
+    "margin insufficient", "not enough margin",
+)
 
 
 # ==================== Socket处理器 - 简化但高可靠版本 ====================
@@ -101,7 +254,7 @@ class AISocketHandler(socketserver.BaseRequestHandler):
             
             if not raw_data:
                 logger.warning("[WARN]  收到空数据")
-                result = {"action": "HOLD", "confidence": 0.0, "reason": "空请求", "use_deepseek": False, "cached": False}
+                result = {"action": "HOLD", "confidence": 0.65, "reason": "安全回退: 空请求，默认HOLD", "use_deepseek": False, "cached": False}
             else:
                 # 2. 解码和清理
                 data = raw_data.decode('utf-8', errors='ignore').strip()
@@ -109,10 +262,17 @@ class AISocketHandler(socketserver.BaseRequestHandler):
                 logger.info(f"[TEST] 收到数据: {data[:200]}...")
                 
                 # 3. 测试消息和健康检查处理
-                if "TEST" in data.upper():
+                try:
+                    payload_type, request_data = parse_socket_payload(data)
+                except json.JSONDecodeError as json_e:
+                    logger.error(f"[ERR] JSON瑙ｆ瀽澶辫触: {json_e}")
+                    logger.error(f"   鍘熷鏁版嵁: {data[:200]}")
+                    result = {"error": str(json_e), "action": "HOLD", "confidence": 0.65, "use_deepseek": False, "reason": "瀹夊叏鍥為€€: JSON瑙ｆ瀽澶辫触", "cached": False}
+                    payload_type, request_data = "invalid", None
+                if payload_type == "test":
                     logger.info("🧪 收到测试消息")
                     result = {"status": "ok", "message": "Server ready"}
-                elif "HEALTHCHECK" in data.upper():
+                elif payload_type == "healthcheck":
                     logger.info("🏥 收到健康检查请求")
                     # 返回完整的服务状态信息
                     result = {
@@ -124,7 +284,7 @@ class AISocketHandler(socketserver.BaseRequestHandler):
                         "current_mode": service_status.get("current_mode", "unknown"),
                         "uptime_seconds": (datetime.now() - service_status.get("start_time", datetime.now())).total_seconds() if "start_time" in service_status else 0
                     }
-                else:
+                elif payload_type == "json":
                     # 4. JSON解析
                     try:
                         json_start = data.find('{')
@@ -154,15 +314,15 @@ class AISocketHandler(socketserver.BaseRequestHandler):
                             try:
                                 result = self.ai_service.process_request(request_data)
                                 if not result:
-                                    result = {"action": "HOLD", "confidence": 0.0, "reason": "处理返回空", "use_deepseek": False, "cached": False}
+                                    result = {"action": "HOLD", "confidence": 0.65, "reason": "安全回退: 处理返回空", "use_deepseek": False, "cached": False}
                             except Exception as proc_e:
                                 logger.warning(f"[WARN]  处理异常: {proc_e}")
-                                result = {"action": "HOLD", "confidence": 0.0, "reason": f"处理异常: {str(proc_e)}", "use_deepseek": False, "cached": False}
+                                result = {"action": "HOLD", "confidence": 0.65, "reason": f"安全回退: {str(proc_e)}", "use_deepseek": False, "cached": False}
                     
                     except json.JSONDecodeError as json_e:
                         logger.error(f"[ERR] JSON解析失败: {json_e}")
                         logger.error(f"   原始数据: {data[:200]}")
-                        result = {"error": str(json_e), "action": "HOLD", "confidence": 0.0, "use_deepseek": False, "reason": "JSON解析失败", "cached": False}
+                        result = {"error": str(json_e), "action": "HOLD", "confidence": 0.65, "use_deepseek": False, "reason": "安全回退: JSON解析失败", "cached": False}
             
             # 6. 确保结果有效
             if not result:
@@ -184,13 +344,12 @@ class AISocketHandler(socketserver.BaseRequestHandler):
             
         except Exception as e:
             logger.error(f"[ERR] handle异常: {e}")
-            import traceback
             logger.error(f"   堆栈: {traceback.format_exc()}")
             try:
                 error_result = {"error": str(e), "action": "HOLD", "confidence": 0.0, "use_deepseek": False, "reason": "服务器内部错误", "cached": False}
                 self.request.sendall((json.dumps(error_result, ensure_ascii=False) + "\n").encode('utf-8'))
-            except:
-                pass
+            except (socket.error, OSError, BrokenPipeError) as send_err:
+                logger.debug(f"[DEBUG] handle错误响应发送失败(客户端可能已断开): {send_err}")
 
 
 class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
@@ -209,8 +368,6 @@ class MT5AITradingService:
         self.ai_analyzer = AIAnalyzer()
         self.validator = DataValidator()
         self.indicator_analyzer = IndicatorAnalyzer()
-        self.last_status_print = time.time()
-        self.status_print_interval = 60.0
         self.mode = "auto"
         self.socket_server = None
         self.socket_thread = None
@@ -229,10 +386,20 @@ class MT5AITradingService:
             websocket_port=8081,
             socket_port=8080
         )
-        self.heartbeat_thread = None
         
         # 交易记录器 - 为PPO强化学习准备
         self.trading_recorder = get_trading_recorder()
+        self.observation_journal = get_m5_observation_journal(config.OBSERVATION_JOURNAL_DIR)
+        
+        # 服务监控模块 (Phase 1: ServiceMonitor)
+        self.monitor = ServiceMonitor(
+            service_registry=self.service_registry,
+            local_instance=self.local_instance,
+            file_handler=file_handler,
+            web_dashboard=None,  # 在 run() 中设置
+            observation_journal=self.observation_journal,
+            current_mode_getter=lambda: _get_service_status("current_mode", "auto"),
+        )
         
         # 风险管理器（可选，依赖numpy/scipy）
         self.risk_manager = None
@@ -264,6 +431,8 @@ class MT5AITradingService:
     
     def _cleanup(self):
         logger.info("🧹 正在清理资源...")
+        # 停止监控模块
+        self.monitor.running = False
         # 停止风险管理器
         if self.risk_manager:
             try:
@@ -306,125 +475,16 @@ class MT5AITradingService:
         logger.info("[OK] 清理完成")
     
     def _print_status(self, force: bool = False):
-        now = time.time()
-        if force or (now - self.last_status_print) >= self.status_print_interval:
-            self.last_status_print = now
-            stats = monitor.get_stats()
-            
-            status_msg = f"[UP] 状态: 请求={stats['total_requests']}"
-            if stats['total_requests'] > 0:
-                avg_ms = stats['average_response_time'] * 1000
-                status_msg += f" | 平均={avg_ms:.0f}ms"
-            
-            cache_total = stats['cache_hits'] + stats['cache_misses']
-            if cache_total > 0:
-                hit_rate = stats['cache_hits'] / cache_total * 100
-                status_msg += f" | 缓存={hit_rate:.0f}%"
-            
-            status_msg += f" | 模式={service_status['current_mode'].upper()}"
-            logger.info(status_msg)
+        """委托到 ServiceMonitor"""
+        self.monitor.print_status(force=force)
     
     def _update_trade_stats(self, trade_history: list):
-        """更新交易统计"""
-        if not trade_history:
-            return
-        
-        # 统计变量
-        total_trades = 0
-        win_trades = 0
-        loss_trades = 0
-        total_profit = 0.0
-        total_loss = 0.0
-        buy_trades = 0
-        sell_trades = 0
-        sl_hits = 0  # 被止损次数
-        tp_hits = 0  # 被止盈次数
-        
-        for trade in trade_history:
-            if trade.get('entry') != 'OUT':  # 只统计平仓交易
-                continue
-            
-            total_trades += 1
-            profit = trade.get('profit', 0)
-            trade_type = trade.get('type', '')
-            sl = trade.get('sl', 0)
-            tp = trade.get('tp', 0)
-            price = trade.get('price', 0)
-            comment = str(trade.get('comment', ''))
-            
-            # MT5平仓逻辑：OUT记录的deal_type是平仓方向，不是原始交易方向
-            # - DEAL_TYPE_BUY OUT = 平空仓 → 原始交易是 SELL
-            # - DEAL_TYPE_SELL OUT = 平多仓 → 原始交易是 BUY
-            if trade_type == 'BUY':
-                sell_trades += 1  # BUY OUT = 平空仓 = SELL开仓
-            elif trade_type == 'SELL':
-                buy_trades += 1   # SELL OUT = 平多仓 = BUY开仓
-            
-            if profit >= 0:
-                win_trades += 1
-                total_profit += profit
-            else:
-                loss_trades += 1
-                total_loss += abs(profit)
-                
-                # 判断是否被止损
-                if sl > 0:
-                    sl_hits += 1
-            
-            # 判断是否被止盈
-            if tp > 0:
-                tp_hits += 1
-        
-        if total_trades > 0:
-            win_rate = win_trades / total_trades * 100
-            avg_win = total_profit / win_trades if win_trades > 0 else 0
-            avg_loss = total_loss / loss_trades if loss_trades > 0 else 0
-            profit_factor = total_profit / total_loss if total_loss > 0 else 0
-            
-            logger.info(f"[STATS] 交易统计 (最近{total_trades}笔):")
-            logger.info(f"  总交易: {total_trades} | 盈利: {win_trades} | 亏损: {loss_trades} | 胜率: {win_rate:.1f}%")
-            logger.info(f"  总盈利: ${total_profit:.2f} | 总亏损: ${total_loss:.2f} | 盈亏比: {profit_factor:.2f}")
-            logger.info(f"  平均盈利: ${avg_win:.2f} | 平均亏损: ${avg_loss:.2f}")
-            logger.info(f"  多单: {buy_trades} | 空单: {sell_trades}")
-            
-            # 存储统计结果供前端展示
-            self._trade_stats = {
-                'total_trades': total_trades,
-                'win_trades': win_trades,
-                'loss_trades': loss_trades,
-                'win_rate': win_rate,
-                'total_profit': total_profit,
-                'total_loss': total_loss,
-                'profit_factor': profit_factor,
-                'avg_win': avg_win,
-                'avg_loss': avg_loss,
-                'buy_trades': buy_trades,
-                'sell_trades': sell_trades,
-                'sl_hits': sl_hits,
-                'tp_hits': tp_hits
-            }
-            
-            # 更新Dashboard显示
-            if self.web_dashboard:
-                self.web_dashboard.trade_stats = self._trade_stats.copy()
+        """委托到 ServiceMonitor"""
+        self.monitor.update_trade_stats(trade_history)
     
     def get_trade_stats(self) -> dict:
-        """获取交易统计"""
-        return getattr(self, '_trade_stats', {
-            'total_trades': 0,
-            'win_trades': 0,
-            'loss_trades': 0,
-            'win_rate': 0,
-            'total_profit': 0,
-            'total_loss': 0,
-            'profit_factor': 0,
-            'avg_win': 0,
-            'avg_loss': 0,
-            'buy_trades': 0,
-            'sell_trades': 0,
-            'sl_hits': 0,
-            'tp_hits': 0
-        })
+        """委托到 ServiceMonitor"""
+        return self.monitor.get_trade_stats()
     
     def _calculate_dynamic_sl_tp(self, symbol: str, action: str, confidence: float, 
                                   bid: float, ask: float, indicators: Optional[dict]) -> Tuple[int, int]:
@@ -559,21 +619,10 @@ class MT5AITradingService:
     def _get_blocking_risk_reason(assessment) -> Optional[str]:
         """返回阻断交易的风险原因；无阻断风险则返回None。"""
         warnings = getattr(assessment, "warning_messages", None) or []
-        blocking_keywords = (
-            "保证金不足",
-            "无法开仓",
-            "保证金追缴",
-            "立即平仓",
-            "账户不允许",
-            "交易被禁用",
-            "风险评估失败",
-            "margin insufficient",
-            "not enough margin",
-        )
 
         for warning in warnings:
             warning_text = str(warning)
-            if any(keyword.lower() in warning_text.lower() for keyword in blocking_keywords):
+            if any(keyword.lower() in warning_text.lower() for keyword in _BLOCKING_RISK_KEYWORDS):
                 return warning_text
 
         position_size = getattr(assessment, "recommended_position_size", None)
@@ -591,6 +640,20 @@ class MT5AITradingService:
                 indicators: Optional[dict] = None,
                 multi_timeframe: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         start_time = time.time()
+        allow_fallback_trading = bool(getattr(config, "ALLOW_FALLBACK_TRADING", False))
+        indicator_fingerprint = build_indicator_fingerprint(indicators)
+
+        def unavailable_ai_hold(reason: str) -> Dict[str, Any]:
+            monitor.record_request(True, time.time() - start_time)
+            return {
+                "action": "HOLD",
+                "confidence": 0.75,
+                "reason": reason,
+                "symbol": symbol,
+                "analysis_time": datetime.now().isoformat(),
+                "use_deepseek": False,
+                "cached": False,
+            }
         
         # 尝试多个缓存键（精确键 + 模糊键）
         cache_keys = get_cache_keys_for_lookup(symbol, bid, ask)
@@ -600,6 +663,17 @@ class MT5AITradingService:
         for cache_key in cache_keys:
             cached = global_cache.get(cache_key)
             if cached:
+                if not isinstance(cached, dict):
+                    logger.info(f"[CACHE] Skipping invalid cached result type: {type(cached).__name__}")
+                    continue
+                cached_action = cached.get("action") if isinstance(cached, dict) else None
+                if not allow_fallback_trading and cached_action in ("BUY", "SELL"):
+                    logger.info(f"[CACHE] Safe mode skips cached trade signal {cached_action}: {cache_key}")
+                    continue
+                cached_fingerprint = cached.get("indicator_fingerprint") if isinstance(cached, dict) else None
+                if indicator_fingerprint and cached_fingerprint != indicator_fingerprint:
+                    logger.info(f"[CACHE] 指标快照变化，跳过缓存结果: {cache_key}")
+                    continue
                 cached_result = cached
                 used_cache_key = cache_key
                 break
@@ -608,6 +682,12 @@ class MT5AITradingService:
             is_exact_match = used_cache_key == cache_keys[0]  # 第一个键是精确键
             logger.info(f"💾 使用{'精确' if is_exact_match else '模糊'}缓存结果 (键: {used_cache_key})")
             monitor.record_cache_hit()
+            if (
+                not allow_fallback_trading
+                and not self.ai_analyzer.is_deepseek_available()
+                and cached_result.get("action") in ("BUY", "SELL")
+            ):
+                return unavailable_ai_hold("AI不可用且后备交易未启用，缓存交易信号降级为HOLD")
             return cached_result
         
         monitor.record_cache_miss()
@@ -620,32 +700,63 @@ class MT5AITradingService:
         stop_loss_pips = None
         take_profit_pips = None
         
+        deepseek_used = False
         if self.ai_analyzer.is_deepseek_available():
             prompt = self.ai_analyzer.build_prompt(symbol, bid, ask, current_time, history, indicators, multi_timeframe)
             ai_result = self.ai_analyzer.call_api(prompt)
             
             if ai_result:
+                deepseek_used = True
                 action = ai_result["action"]
                 confidence = ai_result["confidence"]
                 reason = ai_result["reason"]
                 # 从AI结果中提取止损止盈
                 stop_loss_pips = ai_result.get("stop_loss_pips")
                 take_profit_pips = ai_result.get("take_profit_pips")
-                action, confidence = self.indicator_analyzer.validate_and_adjust(
-                    action, confidence, indicators, symbol, bid, ask
-                )
                 monitor.record_request(True, time.time() - start_time)
             else:
+                if not allow_fallback_trading:
+                    logger.warning("[SAFE] AI分析失败，后备交易未启用，返回HOLD")
+                    return unavailable_ai_hold("AI分析失败，后备交易未启用")
                 logger.warning("[WARN]  AI分析失败，使用后备策略")
                 action, confidence, reason = self.ai_analyzer.get_fallback_strategy(
                     symbol, bid, ask, indicators, multi_timeframe
                 )
                 monitor.record_request(True, time.time() - start_time)
         else:
+            if not allow_fallback_trading:
+                if self.ai_analyzer.use_deepseek:
+                    logger.warning("[SAFE] DeepSeek不可用，后备交易未启用，返回HOLD")
+                    return unavailable_ai_hold("DeepSeek不可用，后备交易未启用")
+                logger.info("[SAFE] DeepSeek已禁用，后备交易未启用，返回HOLD")
+                return unavailable_ai_hold("DeepSeek已禁用，后备交易未启用")
             action, confidence, reason = self.ai_analyzer.get_fallback_strategy(
                 symbol, bid, ask, indicators, multi_timeframe
             )
             monitor.record_request(True, time.time() - start_time)
+
+        indicator_validation = self.indicator_analyzer.evaluate_signal(
+            action, confidence, indicators, symbol, bid, ask
+        )
+        action = indicator_validation["action"]
+        confidence = indicator_validation["confidence"]
+        reason = append_local_reason(reason, indicator_validation.get("reason", ""))
+        
+        # RL模型后备: AI决策为HOLD时, 尝试RL模型给出备选信号
+        if action == "HOLD" and indicators and isinstance(indicators, dict) and getattr(config, "ENABLE_RL_MODEL", False):
+            try:
+                from core.rl_inference import get_rl_signal
+                rl_action, rl_conf, rl_reason = get_rl_signal(indicators, bid, ask)
+                if rl_action != "HOLD" and rl_conf > 0.55:
+                    logger.info(f"[RL] RL后备信号: {rl_action} conf={rl_conf:.2f}")
+                    reason = reason + " | RL备选: " + rl_reason[:60]
+                    # 注意: RL信号仅记录不覆盖AI决策, 保持AI为主
+            except Exception as e:
+                logger.debug(f"[RL] RL后备检查跳过: {e}")
+        
+        if action == "HOLD":
+            stop_loss_pips = None
+            take_profit_pips = None
         
         # 计算动态止损止盈（如果AI没有提供）
         if action in ['BUY', 'SELL'] and (stop_loss_pips is None or take_profit_pips is None):
@@ -662,8 +773,10 @@ class MT5AITradingService:
             "reason": reason,
             "symbol": symbol,
             "analysis_time": datetime.now().isoformat(),
-            "use_deepseek": self.ai_analyzer.use_deepseek,
-            "cached": False
+            "use_deepseek": deepseek_used,
+            "cached": False,
+            "indicator_validation": indicator_validation,
+            "indicator_fingerprint": indicator_fingerprint
         }
         
         # 添加动态止损止盈到结果（仅对交易信号）
@@ -772,79 +885,9 @@ class MT5AITradingService:
         
         return result
     
-    def _heartbeat_loop(self):
-        """心跳循环"""
-        logger.info("[HEART] 心跳线程启动")
-        while self.running:
-            try:
-                self.service_registry.heartbeat(self.local_instance.service_id)
-                time.sleep(5)
-            except Exception as e:
-                logger.warning(f"[WARN]  心跳异常: {e}")
-                time.sleep(1)
+    # _heartbeat_loop 已迁移到 ServiceMonitor，由 run() 统一管理
     
-    def _monitor_account_data(self):
-        """监控 MT5 账户数据文件"""
-        logger.info("[DATA] 账户数据监控线程启动")
-        
-        # 可能的文件位置（优先使用 file_handler 找到的路径）
-        possible_locations = []
-        
-        last_modified = 0
-        
-        while self.running:
-            try:
-                # 先尝试用 file_handler 的路径
-                if file_handler._cached_path:
-                    possible_locations.insert(0, file_handler._cached_path)
-                
-                # 添加常见 MT5 Files 目录
-                common_paths = [
-                    os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "MetaQuotes", "Terminal", "*", "MQL5", "Files"),
-                    os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "MetaQuotes", "Terminal", "*", "Files"),
-                ]
-                
-                account_file = None
-                # 先检查 file_handler 的位置
-                if file_handler._cached_path:
-                    test_file = os.path.join(file_handler._cached_path, "mt5_account.json")
-                    if os.path.exists(test_file):
-                        account_file = test_file
-                
-                # 如果没找到，尝试其他常见位置
-                if not account_file:
-                    for path in common_paths:
-                        import glob
-                        matches = glob.glob(path)
-                        for p in matches:
-                            test_file = os.path.join(p, "mt5_account.json")
-                            if os.path.exists(test_file):
-                                account_file = test_file
-                                break
-                
-                # 如果找到文件
-                if account_file:
-                    mtime = os.path.getmtime(account_file)
-                    if mtime > last_modified:
-                        last_modified = mtime
-                        try:
-                            with open(account_file, 'r', encoding='utf-8') as f:
-                                content = f.read().strip()
-                            
-                            if content:
-                                data = json.loads(content)
-                                if data.get("type") == "mql5_data":
-                                    mql5_manager = get_mql5_data_manager()
-                                    success = mql5_manager.update_from_json(data)
-                                    if success:
-                                        logger.debug(f"[OK] 账户数据已更新")
-                        except Exception as e:
-                            logger.debug(f"[DATA] 读取账户数据异常: {e}")
-                
-                time.sleep(1)
-            except Exception as e:
-                logger.debug(f"[WARN]  账户数据监控异常: {e}")
-                time.sleep(1)
+    # _monitor_account_data 已迁移到 ServiceMonitor，由 run() 统一管理
     
     def process_request(self, request_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         try:
@@ -857,14 +900,39 @@ class MT5AITradingService:
             if request_data.get("type") == "mql5_data":
                 mql5_manager = get_mql5_data_manager()
                 success = mql5_manager.update_from_json(request_data)
-                return {
+                return _build_protocol_response({
                     "status": "ok" if success else "error",
                     "action": "HOLD",
                     "confidence": 0.0,
                     "reason": "MQL5数据更新" if success else "MQL5数据更新失败",
                     "use_deepseek": False,
                     "cached": False
-                }
+                }, str(request_data.get("request_id", "")), response_matched=bool(request_data.get("request_id")))
+
+            request_id = str(request_data.get("request_id", "")).strip()
+            request_created_at = request_data.get("request_created_at") or request_data.get("timestamp")
+            request_read_at = request_data.get("_request_read_at") or _utc_now_iso()
+            ea_timeout_seconds = request_data.get("ea_timeout_seconds")
+            if not request_id:
+                return _build_protocol_response({
+                    "action": "HOLD",
+                    "confidence": 0.0,
+                    "reason": "Missing request_id; request ignored for stale-response safety",
+                    "symbol": str(request_data.get("symbol", "UNKNOWN")),
+                    "analysis_time": _utc_now_iso(),
+                    "use_deepseek": False,
+                    "cached": False,
+                    "request_created_at": request_created_at,
+                    "request_read_at": request_read_at,
+                    "ai_started_at": None,
+                    "ai_finished_at": None,
+                    "latency_total_ms": _total_latency_ms(request_created_at, request_read_at, _utc_now_iso()),
+                    "latency_ai_ms": None,
+                    "response_matched": False,
+                    "stale_response": False,
+                    "ea_timeout_seconds": ea_timeout_seconds,
+                    "blocked_by": ["MISSING_REQUEST_ID"],
+                }, "", response_matched=False, stale_response=False)
             
             validated_request = dict(request_data)
             try:
@@ -874,15 +942,25 @@ class MT5AITradingService:
                 self.validator.validate_request(validated_request)
             except Exception as validation_error:
                 logger.warning(f"[SAFE] 请求校验失败，返回HOLD: {validation_error}")
-                return {
+                return _build_protocol_response({
                     "action": "HOLD",
                     "confidence": 0.0,
                     "reason": f"请求校验失败: {validation_error}",
                     "symbol": str(request_data.get("symbol", "UNKNOWN")),
-                    "analysis_time": datetime.now().isoformat(),
+                    "analysis_time": _utc_now_iso(),
                     "use_deepseek": False,
-                    "cached": False
-                }
+                    "cached": False,
+                    "request_created_at": request_created_at,
+                    "request_read_at": request_read_at,
+                    "ai_started_at": None,
+                    "ai_finished_at": None,
+                    "latency_total_ms": _total_latency_ms(request_created_at, request_read_at, _utc_now_iso()),
+                    "latency_ai_ms": None,
+                    "response_matched": True,
+                    "stale_response": False,
+                    "ea_timeout_seconds": ea_timeout_seconds,
+                    "blocked_by": ["REQUEST_VALIDATION_FAILED"],
+                }, request_id, response_matched=True, stale_response=False)
 
             symbol = validated_request["symbol"].strip()
             bid = validated_request["bid"]
@@ -890,6 +968,16 @@ class MT5AITradingService:
             current_time = validated_request["time"]
             history = request_data.get("history")
             indicators = request_data.get("indicators")
+            
+            # 兼容EA的扁平JSON格式: 顶层rsi/macd_main/macd_signal/ema50 → 嵌套indicators
+            if not isinstance(indicators, dict):
+                flat_indicators = {}
+                for key in ("rsi", "macd_main", "macd_signal", "ema50", "atr", "stochastic_k", "stochastic_d"):
+                    if key in request_data and request_data[key] is not None:
+                        flat_indicators[key] = request_data[key]
+                if flat_indicators:
+                    indicators = flat_indicators
+                    logger.debug(f"[DATA] 从EA扁平JSON提取指标: {list(flat_indicators.keys())}")
             multi_timeframe = request_data.get("multi_timeframe")
             account_data = request_data.get("account_data")  # 从请求中获取账户数据
             trade_history = request_data.get("trade_history", [])  # 交易历史数据
@@ -918,7 +1006,22 @@ class MT5AITradingService:
                 self._update_trade_stats(trade_history)
             
             logger.info(f"📥 收到请求: {symbol} Bid={bid} Ask={ask}")
+            ai_started_at = _utc_now_iso()
             result = self.analyze(symbol, bid, ask, current_time, history, indicators, multi_timeframe)
+            ai_finished_at = _utc_now_iso()
+            if result:
+                payload = dict(result)
+                payload["request_created_at"] = request_created_at
+                payload["request_read_at"] = request_read_at
+                payload["ai_started_at"] = ai_started_at
+                payload["ai_finished_at"] = ai_finished_at
+                payload["latency_ai_ms"] = _latency_ms(ai_started_at, ai_finished_at)
+                payload["latency_total_ms"] = _total_latency_ms(request_created_at, request_read_at, ai_finished_at)
+                payload["response_matched"] = True
+                payload["stale_response"] = False
+                payload["ea_timeout_seconds"] = ea_timeout_seconds
+                payload["blocked_by"] = _derive_blocked_by(payload)
+                result = _build_protocol_response(payload, request_id, response_matched=True, stale_response=False)
             
             # Add to dashboard
             if result and self.web_dashboard:
@@ -967,19 +1070,22 @@ class MT5AITradingService:
         
         except Exception as e:
             logger.error(f"[ERR] 处理请求失败: {e}")
-            import traceback
             logger.error(f"   堆栈: {traceback.format_exc()}")
             monitor.record_request(False, 0)
             if self.web_dashboard:
                 self.web_dashboard.record_request(False)
-            return {
+            request_id = str(request_data.get("request_id", "")) if isinstance(request_data, dict) else ""
+            return _build_protocol_response({
                 "action": "HOLD",
                 "confidence": 0.0,
                 "reason": f"处理请求异常: {str(e)}",
-                "analysis_time": datetime.now().isoformat(),
+                "analysis_time": _utc_now_iso(),
                 "use_deepseek": False,
-                "cached": False
-            }
+                "cached": False,
+                "response_matched": bool(isinstance(request_data, dict) and request_data.get("request_id")),
+                "stale_response": False,
+                "blocked_by": ["PROCESSING_EXCEPTION"],
+            }, request_id, response_matched=bool(request_id), stale_response=False)
     
     def get_weight_optimizer_status(self) -> Dict[str, Any]:
         """获取权重优化器状态"""
@@ -1004,12 +1110,12 @@ class MT5AITradingService:
             self.socket_thread.daemon = True
             self.socket_thread.start()
             
-            service_status["socket_available"] = True
+            _update_service_status("socket_available", True)
             logger.info(f"[OK] Socket服务器已启动，监听 {config.SOCKET_HOST}:{config.SOCKET_PORT}")
             
         except Exception as e:
             logger.error(f"[ERR] 启动Socket服务器失败: {e}")
-            service_status["socket_available"] = False
+            _update_service_status("socket_available", False)
             raise
     
     def _run_socket_server(self):
@@ -1028,8 +1134,8 @@ class MT5AITradingService:
             if self.socket_server:
                 try:
                     self.socket_server.server_close()
-                except:
-                    pass
+                except Exception as exc:
+                    logger.debug(f"[DEBUG] Socket服务器关闭异常: {exc}")
     
     def _start_websocket_mode(self) -> bool:
         logger.info(f"-> 启动WebSocket服务器 ({config.SOCKET_HOST}:{config.SOCKET_PORT+1})...")
@@ -1073,8 +1179,7 @@ class MT5AITradingService:
             
         except Exception as e:
             logger.error(f"[ERR] 启动WebSocket服务器失败: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"   堆栈: {traceback.format_exc()}")
             return False
     
     def _run_file_mode(self):
@@ -1085,41 +1190,60 @@ class MT5AITradingService:
                 file_handler.update_health_check()
                 mt5_path = file_handler.find_request_file()
                 if mt5_path is None:
-                    time.sleep(0.05)
+                    time.sleep(0.1)  # 无请求时适当休眠，避免忙等待
                     continue
                 
                 logger.info(f"[DIR] 找到请求文件，路径: {mt5_path}")
+                file_handler.write_service_ready(mt5_path, self.local_instance.service_id, self.mode, ready=True)
                 
                 request_file = Path(mt5_path) / "ai_request.json"
                 content = file_handler.safe_read(str(request_file))
                 
                 if not content:
                     logger.info(f"[WARN]  请求文件内容为空")
-                    time.sleep(0.05)
+                    time.sleep(config.FILE_CHECK_INTERVAL)
                     continue
                 
                 logger.info(f"📥 收到请求文件内容: {content[:200]}...")
                 
                 try:
                     request_data = json.loads(content)
+                    request_data["_request_read_at"] = _utc_now_iso()
                     response_data = self.process_request(request_data)
                     if response_data:
+                        response_data["response_written_at"] = _utc_now_iso()
+                        logger.info(
+                            "[RESPONSE] protocol=%s request_id=%s action=%s confidence=%s blocked_by=%s",
+                            response_data.get("protocol_version"),
+                            response_data.get("request_id"),
+                            response_data.get("action"),
+                            response_data.get("confidence"),
+                            response_data.get("blocked_by"),
+                        )
                         logger.info(f"📤 准备写入响应文件，路径: {mt5_path}")
                         logger.info(f"📤 响应内容: {json.dumps(response_data, ensure_ascii=False)[:200]}...")
                         
                         result = file_handler.write_response(response_data, mt5_path)
-                        
+                        if getattr(config, "OBSERVATION_JOURNAL_ENABLED", True):
+                            try:
+                                journal = getattr(self, "observation_journal", None)
+                                if journal is not None:
+                                    journal.record(request_data, response_data, response_write_ok=bool(result))
+                            except Exception as journal_error:
+                                logger.warning(f"[OBS] observation journal write skipped: {journal_error}")
+                         
                         if result:
                             logger.info(f"[OK] 响应文件写入成功")
                         else:
                             logger.error(f"[ERR] 响应文件写入失败")
                 
                 except json.JSONDecodeError as e:
-                    logger.error(f"[ERR] JSON解析失败: {e}")
+                    logger.error(f"[ERR] JSON解析失败: {e}, 原始数据: {content[:100]}")
                 except Exception as e:
-                    logger.error(f"[ERR] 处理请求异常: {e}")
+                    logger.error(f"[ERR] 处理请求异常: {e}, 文件: {request_file}")
+                    logger.error(f"   堆栈: {traceback.format_exc()}")
                 finally:
-                    time.sleep(0.01)
+                    time.sleep(config.FILE_CHECK_INTERVAL)
             
             except Exception as e:
                 logger.error(f"[ERR] 文件模式循环错误: {e}")
@@ -1128,22 +1252,19 @@ class MT5AITradingService:
     def run(self, mode: str = "auto"):
         self.running = True
         self.mode = mode
-        service_status["current_mode"] = mode
-        service_status["start_time"] = datetime.now()
+        _update_service_status("current_mode", mode)
+        _update_service_status("start_time", datetime.now())
         
         # 启动高可用架构
         self.service_registry.start()
         self.service_registry.register(self.local_instance)
         logger.info(f"[OK] 高可用架构启动，服务ID: {self.local_instance.service_id}")
         
-        # 启动心跳线程
-        self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
-        self.heartbeat_thread.start()
-        
-        # 启动账户数据监控线程
-        self.account_monitor_thread = threading.Thread(target=self._monitor_account_data, daemon=True)
-        self.account_monitor_thread.start()
-        logger.info("[OK] 账户数据监控线程启动")
+        # 启动监控模块（心跳 + 账户数据监控）
+        self.monitor.running = True
+        self.monitor.start_heartbeat()
+        self.monitor.start_account_monitor()
+        logger.info("[OK] 服务监控模块启动")
         
         print("\n" + "="*70)
         print("[TARGET] MT5 AI交易系统 - 企业级增强版 V3.0")
@@ -1152,7 +1273,12 @@ class MT5AITradingService:
         print("[DATA] 配置信息:")
         print(f"  - 通信模式: {mode.upper()}")
         deepseek_status = self.ai_analyzer.get_deepseek_status()
-        deepseek_prefix = "[OK]" if deepseek_status == "启用" else "[ERR]"
+        if deepseek_status == "启用":
+            deepseek_prefix = "[OK]"
+        elif deepseek_status == "禁用":
+            deepseek_prefix = "[OFF]"
+        else:
+            deepseek_prefix = "[WARN]"
         print(f"  - DeepSeek: {deepseek_prefix} {deepseek_status}")
         print(f"  - 缓存大小: {config.CACHE_SIZE}")
         print(f"  - 置信度阈值: {config.MIN_CONFIDENCE}")
@@ -1173,8 +1299,11 @@ class MT5AITradingService:
         # Start web dashboard
         self.web_dashboard = WebDashboard(host="127.0.0.1", port=8000)
         self.web_dashboard.start()
+        self.monitor._web_dashboard = self.web_dashboard  # 同步到监控模块
         
         self._print_status(force=True)
+        published_ready = file_handler.publish_ready_to_known_paths(self.local_instance.service_id, mode)
+        logger.info(f"[READY] service_ready.json published to {published_ready} path(s)")
         
         try:
             # File模式：只运行文件
