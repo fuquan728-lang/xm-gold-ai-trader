@@ -419,8 +419,14 @@ class MT5Client:
             raise MT5ClientError(f"order_check returned None: {module.last_error()}")
         return result
 
-    def order_send_checked(self, request: dict[str, Any], order_check_result: Any) -> Any:
-        from src.broker.execution_safety import order_check_passed
+    def order_send_checked(
+        self,
+        request: dict[str, Any],
+        order_check_result: Any,
+        *,
+        require_success: bool = True,
+    ) -> Any:
+        from src.broker.execution_safety import order_check_passed, order_send_failure_decision, order_send_passed
 
         if not order_check_passed(order_check_result):
             raise MT5ClientError("order_send blocked because order_check did not pass")
@@ -428,6 +434,9 @@ class MT5Client:
         result = module.order_send(request)
         if result is None:
             raise MT5ClientError(f"order_send returned None: {module.last_error()}")
+        if require_success and not order_send_passed(result):
+            decision = order_send_failure_decision(result)
+            raise MT5ClientError("; ".join(decision.reasons))
         return result
 
     def place_market_order(

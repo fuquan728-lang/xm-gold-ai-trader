@@ -31,6 +31,7 @@ class Config:
     def __init__(self):
         self._lock = threading.RLock()
         self._callbacks: Dict[str, List[Callable]] = {}
+        self._warnings: List[str] = []
         self._load_env()
         self._set_defaults()
         self._validate_config()
@@ -49,18 +50,23 @@ class Config:
         self.DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
         self.DEEPSEEK_API_URL = os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1/chat/completions")
         self.DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-        self.USE_DEEPSEEK = os.getenv("USE_DEEPSEEK", "false").lower() == "true"
+        self.USE_DEEPSEEK = os.getenv("USE_DEEPSEEK", "true").lower() == "true"
+        self.ALLOW_FALLBACK_TRADING = os.getenv("ALLOW_FALLBACK_TRADING", "false").lower() == "true"
         
         # 性能配置
         self.REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
         self.CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "10"))
         self.MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
         self.CACHE_SIZE = int(os.getenv("CACHE_SIZE", "100"))
+        self.ENABLE_RL_MODEL = os.getenv("ENABLE_RL_MODEL", "false").lower() == "true"
+        self.OBSERVATION_JOURNAL_ENABLED = os.getenv("OBSERVATION_JOURNAL_ENABLED", "true").lower() == "true"
+        self.OBSERVATION_JOURNAL_DIR = os.getenv("OBSERVATION_JOURNAL_DIR", "logs/m5_observations")
         
         # 交易策略配置
-        self.MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.75"))
+        self.MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.65"))
         self.MIN_INDICATOR_SIGNALS = int(os.getenv("MIN_INDICATOR_SIGNALS", "3"))
         self.MIN_CONSISTENCY = float(os.getenv("MIN_CONSISTENCY", "0.7"))
+        self.MAX_TRADE_SPREAD_PIPS = float(os.getenv("MAX_TRADE_SPREAD_PIPS", "3.0"))
         
         # 缓存配置
         self.CACHE_ENABLED = os.getenv("CACHE_ENABLED", "true").lower() == "true"
@@ -137,8 +143,23 @@ class Config:
         self.MARKET_DATA_UPDATE_INTERVAL = int(os.getenv("MARKET_DATA_UPDATE_INTERVAL", "60"))  # 60秒
     
     def _set_defaults(self):
-        """设置默认值（可在此添加计算型默认值）"""
-        pass
+        """设置计算型默认值（依赖其他配置项的值）"""
+        # 根据通信模式设置连接相关默认值
+        if not hasattr(self, 'SOCKET_TIMEOUT') or self.SOCKET_TIMEOUT <= 0:
+            self.SOCKET_TIMEOUT = 45.0
+        
+        if not hasattr(self, 'MAX_CONCURRENT_CONNECTIONS') or self.MAX_CONCURRENT_CONNECTIONS <= 0:
+            self.MAX_CONCURRENT_CONNECTIONS = 10
+        
+        # 确保文件模式路径存在
+        if hasattr(self, 'FILE_MODE_PATH') and self.FILE_MODE_PATH:
+            import os as _os
+            if not _os.path.exists(self.FILE_MODE_PATH):
+                self._warnings.append(f"FILE_MODE_PATH does not exist: {self.FILE_MODE_PATH}")
+        
+        # 计算衍生配置
+        self.RESPONSE_TIMEOUT_MS = int(self.SOCKET_TIMEOUT * 1000) if hasattr(self, 'SOCKET_TIMEOUT') else 45000
+        self.FAILOVER_WINDOW_SEC = 60 * 5  # 5分钟故障转移窗口
     
     def _validate_config(self):
         """验证配置"""
@@ -274,11 +295,7 @@ class Config:
             base_paths.append(str(Path(app_data) / "MetaQuotes" / "Terminal" / "Files"))
             base_paths.append(str(Path(app_data) / "MetaQuotes" / "Terminal"))
         
-        # 兼容旧路径
-        base_paths.append(r"c:\Users\Administrator\Desktop\XM Global MT5\MQL5\Files")
-        base_paths.append(r"c:\Users\Administrator\Desktop\XM Global MT5")
-        base_paths.append(r"d:\XM Global MT5\MQL5\Files")
-        base_paths.append(r"d:\XM Global MT5")
+        # 兼容旧路径（已移除硬编码路径，统一使用 project_root 和 MT5_PRIMARY_PATH 动态推导）
         
         return [p for p in base_paths if p]
     
@@ -299,40 +316,27 @@ class Config:
 # ==================== 全局配置实例 ====================
 config = Config()
 
-# ==================== 模块级变量导出（兼容旧代码） ====================
-DEEPSEEK_API_KEY = config.DEEPSEEK_API_KEY
-DEEPSEEK_API_URL = config.DEEPSEEK_API_URL
-DEEPSEEK_MODEL = config.DEEPSEEK_MODEL
-USE_DEEPSEEK = config.USE_DEEPSEEK
-REQUEST_TIMEOUT = config.REQUEST_TIMEOUT
-CONNECTION_POOL_SIZE = config.CONNECTION_POOL_SIZE
-MAX_RETRIES = config.MAX_RETRIES
-CACHE_SIZE = config.CACHE_SIZE
-MIN_CONFIDENCE = config.MIN_CONFIDENCE
-MIN_INDICATOR_SIGNALS = config.MIN_INDICATOR_SIGNALS
-MIN_CONSISTENCY = config.MIN_CONSISTENCY
-COMMUNICATION_MODE = config.COMMUNICATION_MODE
-SOCKET_HOST = config.SOCKET_HOST
-SOCKET_PORT = config.SOCKET_PORT
-SOCKET_TIMEOUT = config.SOCKET_TIMEOUT
-MAX_CONCURRENT_CONNECTIONS = config.MAX_CONCURRENT_CONNECTIONS
-RETRY_BACKOFF_FACTOR = config.RETRY_BACKOFF_FACTOR
-FAILOVER_THRESHOLD = config.FAILOVER_THRESHOLD
-AUTO_SWITCH_THRESHOLD = config.AUTO_SWITCH_THRESHOLD
-FILE_MODE_PATH = config.FILE_MODE_PATH
-MT5_PRIMARY_PATH = config.MT5_PRIMARY_PATH
-CACHE_ENABLED = config.CACHE_ENABLED
-FILE_CHECK_INTERVAL = config.FILE_CHECK_INTERVAL
-MAX_WAIT_RETRIES = config.MAX_WAIT_RETRIES
-WEBSOCKET_PORT = config.WEBSOCKET_PORT
-WEBSOCKET_ENABLED = config.WEBSOCKET_ENABLED
-HTTP_PORT = config.HTTP_PORT
-HTTP_ENABLED = config.HTTP_ENABLED
-MQL5_DATA_PORT = config.MQL5_DATA_PORT
-MQL5_DATA_ENABLED = config.MQL5_DATA_ENABLED
-MAX_DAILY_LOSS = config.MAX_DAILY_LOSS
-MAX_POSITIONS = config.MAX_POSITIONS
-RISK_SCORE_THRESHOLD = config.RISK_SCORE_THRESHOLD
+# ==================== 模块级变量导出（兼容旧代码，通过 _sync_module_vars 保持同步） ====================
+_EXPORTED_CONFIG_KEYS = [
+    'DEEPSEEK_API_KEY', 'DEEPSEEK_API_URL', 'DEEPSEEK_MODEL', 'USE_DEEPSEEK',
+    'ALLOW_FALLBACK_TRADING',
+    'REQUEST_TIMEOUT', 'CONNECTION_POOL_SIZE', 'MAX_RETRIES', 'CACHE_SIZE', 'ENABLE_RL_MODEL',
+    'OBSERVATION_JOURNAL_ENABLED', 'OBSERVATION_JOURNAL_DIR',
+    'MIN_CONFIDENCE', 'MIN_INDICATOR_SIGNALS', 'MIN_CONSISTENCY', 'MAX_TRADE_SPREAD_PIPS',
+    'COMMUNICATION_MODE', 'SOCKET_HOST', 'SOCKET_PORT', 'SOCKET_TIMEOUT',
+    'MAX_CONCURRENT_CONNECTIONS', 'RETRY_BACKOFF_FACTOR', 'FAILOVER_THRESHOLD', 'AUTO_SWITCH_THRESHOLD',
+    'FILE_MODE_PATH', 'MT5_PRIMARY_PATH', 'CACHE_ENABLED', 'FILE_CHECK_INTERVAL', 'MAX_WAIT_RETRIES',
+    'WEBSOCKET_PORT', 'WEBSOCKET_ENABLED', 'HTTP_PORT', 'HTTP_ENABLED',
+    'MQL5_DATA_PORT', 'MQL5_DATA_ENABLED',
+    'MAX_DAILY_LOSS', 'MAX_POSITIONS', 'RISK_SCORE_THRESHOLD',
+    'FINANCE_DATA_ENABLED', 'NEODATA_ENABLED', 'MT5_QPI_ENABLED',
+    'GOLD_MIN_SPREAD', 'GOLD_MAX_SPREAD', 'DEFAULT_STOP_LOSS_PCT', 'DEFAULT_TAKE_PROFIT_PCT',
+    'RISK_PER_TRADE_PCT', 'MAX_POSITION_SIZE', 'OVERNIGHT_FEE_FACTOR',
+]
+
+# 动态生成模块级变量（保持与 Config 实例同步）
+for _key in _EXPORTED_CONFIG_KEYS:
+    globals()[_key] = getattr(config, _key)
 
 
 # ==================== 兼容性函数（供旧代码调用） ====================

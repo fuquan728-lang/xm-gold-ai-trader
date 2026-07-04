@@ -13,6 +13,8 @@ from src.broker.execution_safety import (
     evaluate_execution_safety,
     order_check_failure_decision,
     order_check_passed,
+    order_send_failure_decision,
+    order_send_passed,
 )
 from src.broker.mt5_client import MT5Client
 from src.strategy.baseline_signal import TradeSignal
@@ -57,13 +59,15 @@ class TradingConfig:
             execution_data = {}
         if not isinstance(execution_data, Mapping):
             raise ValueError("execution config must be a mapping")
+        execution_values = _normalize_execution_config(dict(execution_data))
+        risk_values = _normalize_risk_config(dict(risk_data))
         return cls(
             symbol=str(data.get("symbol", "GOLD_")),
             deviation_points=int(data.get("deviation_points", 50)),
             magic_number=int(data.get("magic_number", 26052601)),
             order_comment=str(data.get("order_comment", "xm-gold-ai-trader")),
-            execution=ExecutionConfig(**dict(execution_data)),
-            risk=RiskConfig(**dict(risk_data)),
+            execution=ExecutionConfig(**execution_values),
+            risk=RiskConfig(**risk_values),
         )
 
 
@@ -139,6 +143,7 @@ class OrderExecutor:
         account = self.mt5_client.get_account_info()
         positions = self.mt5_client.get_open_positions(self.config.symbol)
         daily_pnl = self.mt5_client.get_daily_realized_pnl(self.config.symbol)
+        orders_today = self._get_orders_today()
         entry_price = tick.ask if signal.side == "BUY" else tick.bid
         current_spread = spread_points_from_prices(tick.bid, tick.ask, symbol_info.point)
 
@@ -147,6 +152,7 @@ class OrderExecutor:
             account_info=account.raw if account is not None else None,
             symbol=self.config.symbol,
             open_positions=positions,
+            orders_today=orders_today,
             project_magic=self.config.magic_number,
             require_order_send_permission=self.config.execution.allow_order_send,
         )
@@ -250,7 +256,26 @@ class OrderExecutor:
                 message="; ".join(check_decision.reasons),
             )
 
-        order_result = self.mt5_client.order_send_checked(order_request, order_check_result)
+        order_result = self.mt5_client.order_send_checked(
+            order_request,
+            order_check_result,
+            require_success=False,
+        )
+        if not order_send_passed(order_result):
+            send_decision = order_send_failure_decision(order_result)
+            return ExecutionResult(
+                status="blocked",
+                symbol=self.config.symbol,
+                side=signal.side,
+                volume=0.0,
+                paper_mode=False,
+                risk_decision=risk_decision,
+                execution_decision=execution_decision,
+                order_check_result=order_check_result,
+                reason_codes=send_decision.reason_codes,
+                order_result=order_result,
+                message="; ".join(send_decision.reasons),
+            )
         self.logger.info("Live order sent: %s", order_result)
         return ExecutionResult(
             status="sent",
@@ -265,6 +290,11 @@ class OrderExecutor:
             order_result=order_result,
             message="live order sent",
         )
+
+    def _get_orders_today(self) -> int:
+        if hasattr(self.mt5_client, "get_daily_order_count"):
+            return int(self.mt5_client.get_daily_order_count(self.config.symbol, self.config.magic_number))
+        return 0
 
 
 def load_trading_config(path: str | Path) -> TradingConfig:
@@ -288,7 +318,28 @@ def load_trading_config(path: str | Path) -> TradingConfig:
     return TradingConfig.from_mapping(data)
 
 
-def _as_bool(value: Any) -> bool:
+def _normalize_execution_config(data: dict[str, Any]) -> dict[str, Any]:
+    for key in (
+        "allow_order_send",
+        "require_demo_account",
+        "emergency_stop",
+        "one_shot_only",
+        "require_manual_confirmation",
+        "require_env_confirmation",
+    ):
+        if key in data:
+            data[key] = _as_bool(data[key], key)
+    return data
+
+
+def _normalize_risk_config(data: dict[str, Any]) -> dict[str, Any]:
+    for key in ("one_position_only", "allow_martingale", "allow_grid", "allow_lot_increase_after_loss"):
+        if key in data:
+            data[key] = _as_bool(data[key], key)
+    return data
+
+
+def _as_bool(value: Any, field_name: str = "value") -> bool:
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -297,4 +348,7 @@ def _as_bool(value: Any) -> bool:
             return True
         if normalized in {"false", "0", "no", "n", "off", ""}:
             return False
-    return bool(value)
+        raise ValueError(f"{field_name} must be a boolean string")
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    raise ValueError(f"{field_name} must be a boolean")

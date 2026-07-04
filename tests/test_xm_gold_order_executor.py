@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from src.broker.execution_safety import ExecutionConfig, REASON_MAX_POSITIONS
+from src.broker.execution_safety import (
+    ExecutionConfig,
+    REASON_MAX_ORDERS_PER_DAY,
+    REASON_MAX_POSITIONS,
+    REASON_ORDER_SEND_FAILED,
+)
 from src.broker.order_executor import (
     REASON_ORDER_SEND_DISABLED,
     OrderExecutor,
@@ -26,11 +31,13 @@ SYMBOL_INFO_FIXTURE = {
 
 
 class FakeMT5Client:
-    def __init__(self, positions=None) -> None:
+    def __init__(self, positions=None, *, daily_order_count: int = 0, order_send_retcode: int = 10009) -> None:
         self.place_market_order_calls: list[dict] = []
         self.order_check_calls: list[dict] = []
         self.order_send_checked_calls: list[dict] = []
         self.positions = positions or []
+        self.daily_order_count = daily_order_count
+        self.order_send_retcode = order_send_retcode
 
     def get_symbol_info(self, symbol: str):
         assert symbol == "GOLD_"
@@ -61,6 +68,11 @@ class FakeMT5Client:
         assert symbol == "GOLD_"
         return 0.0
 
+    def get_daily_order_count(self, symbol: str, magic_number: int):
+        assert symbol == "GOLD_"
+        assert magic_number == 26052601
+        return self.daily_order_count
+
     def place_market_order(self, **kwargs):
         self.place_market_order_calls.append(kwargs)
         return SimpleNamespace(retcode=10009, order=123456)
@@ -72,9 +84,9 @@ class FakeMT5Client:
         self.order_check_calls.append(request)
         return SimpleNamespace(retcode=0, comment="ok")
 
-    def order_send_checked(self, request, order_check_result):
+    def order_send_checked(self, request, order_check_result, **kwargs):
         self.order_send_checked_calls.append({"request": request, "order_check_result": order_check_result})
-        return SimpleNamespace(retcode=10009, order=123456)
+        return SimpleNamespace(retcode=self.order_send_retcode, order=123456, comment="sent")
 
 
 def actionable_signal() -> TradeSignal:
@@ -122,3 +134,26 @@ def test_order_executor_blocks_when_existing_gold_position_is_open():
     assert result.status == "blocked"
     assert REASON_MAX_POSITIONS in result.reason_codes
     assert client.place_market_order_calls == []
+
+
+def test_order_executor_enforces_daily_order_limit_before_order_check():
+    client = FakeMT5Client(daily_order_count=1)
+    config = TradingConfig(execution=ExecutionConfig(allow_order_send=True, max_orders_per_day=1))
+
+    result = OrderExecutor(client, config).execute_signal(actionable_signal())
+
+    assert result.status == "blocked"
+    assert REASON_MAX_ORDERS_PER_DAY in result.reason_codes
+    assert client.order_check_calls == []
+    assert client.order_send_checked_calls == []
+
+
+def test_order_executor_blocks_failed_order_send_retcode():
+    client = FakeMT5Client(order_send_retcode=10030)
+    config = TradingConfig(execution=ExecutionConfig(allow_order_send=True))
+
+    result = OrderExecutor(client, config).execute_signal(actionable_signal())
+
+    assert result.status == "blocked"
+    assert REASON_ORDER_SEND_FAILED in result.reason_codes
+    assert len(client.order_send_checked_calls) == 1

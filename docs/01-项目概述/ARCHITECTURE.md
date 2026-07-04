@@ -17,8 +17,8 @@ MT5 AI交易系统采用**微服务架构**，分为三大核心模块：
 ### 1. MQL5 EA模块（客户端）
 - **位置**: `MQL5/Experts/`
 - **主要文件**: 
-  - `AI_Trader_Integrated_Socket.mq5` - 主EA程序
-  - `socket_test.mq5` - Socket测试脚本
+  - `AI_Trader_V3.2_Integrated.mq5` - 主EA程序
+  - `MQL5/Scripts/Socket_Connection_Test.mq5` - Socket测试脚本
 - **功能**:
   - 市场数据采集与预处理
   - 多模式通信（Socket/File/Auto）

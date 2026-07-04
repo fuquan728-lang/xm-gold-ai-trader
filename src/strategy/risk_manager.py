@@ -23,6 +23,10 @@ REASON_SELL_SL_NOT_ABOVE_ENTRY = "SELL_SL_NOT_ABOVE_ENTRY"
 REASON_BUY_TP_NOT_ABOVE_ENTRY = "BUY_TP_NOT_ABOVE_ENTRY"
 REASON_SELL_TP_NOT_BELOW_ENTRY = "SELL_TP_NOT_BELOW_ENTRY"
 REASON_LOT_BELOW_VOLUME_MIN = "LOT_BELOW_VOLUME_MIN"
+# 新增：core → src 交叉增强的账户安全闸门
+REASON_MARGIN_LEVEL_LOW = "MARGIN_LEVEL_LOW"
+REASON_DRAWDOWN_EXCEEDED = "DRAWDOWN_EXCEEDED"
+REASON_CONSECUTIVE_LOSSES = "CONSECUTIVE_LOSSES"
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +75,9 @@ class RiskConfig:
     allow_martingale: bool = False
     allow_grid: bool = False
     allow_lot_increase_after_loss: bool = False
+    max_drawdown_pct: float = 20.0         # 最大回撤%（core→src交叉增强）
+    max_consecutive_losses: int = 5        # 最大连续亏损次数（core→src交叉增强）
+    min_margin_level: float = 50.0         # 最低保证金水平%（core→src交叉增强）
 
     def __post_init__(self) -> None:
         if self.risk_per_trade_pct <= 0:
@@ -111,6 +118,8 @@ class TradeRiskRequest:
     current_spread_points: float
     take_profit_price: float | None = None
     open_positions: Sequence[Any] = field(default_factory=tuple)
+    margin_level: float = 0.0               # 保证金水平%（core→src交叉增强）
+    consecutive_losses: int = 0             # 连续亏损次数（core→src交叉增强）
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +152,31 @@ class RiskManager:
 
         if request.account.equity <= 0 or request.account.balance <= 0:
             _block(reason_codes, reasons, REASON_INVALID_ACCOUNT, "account balance/equity must be positive")
+
+        # ====== core → src 交叉增强：账户安全闸门 ======
+        # 1. 保证金水平检查（低于阈值禁止开仓）
+        if request.margin_level > 0 and request.margin_level < self.config.min_margin_level:
+            _block(
+                reason_codes, reasons, REASON_MARGIN_LEVEL_LOW,
+                f"margin level too low: {request.margin_level:.1f}% < {self.config.min_margin_level:.1f}%"
+            )
+
+        # 2. 当前回撤检查（基于 balance - equity 差值）
+        if request.account.balance > 0:
+            current_drawdown = request.account.balance - request.account.equity
+            drawdown_pct = (current_drawdown / request.account.balance) * 100
+            if drawdown_pct > self.config.max_drawdown_pct:
+                _block(
+                    reason_codes, reasons, REASON_DRAWDOWN_EXCEEDED,
+                    f"drawdown exceeded: {drawdown_pct:.2f}% > {self.config.max_drawdown_pct:.1f}%"
+                )
+
+        # 3. 连续亏损检查
+        if request.consecutive_losses >= self.config.max_consecutive_losses:
+            _block(
+                reason_codes, reasons, REASON_CONSECUTIVE_LOSSES,
+                f"consecutive losses: {request.consecutive_losses} >= {self.config.max_consecutive_losses}"
+            )
 
         daily_loss_limit = (
             max_daily_loss_amount(request.account.balance, self.config.max_daily_loss_pct)

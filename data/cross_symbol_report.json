@@ -1,0 +1,13 @@
+{
+  "timestamp": "2026-07-01T10:09:07.736843",
+  "symbols_tested": 0,
+  "symbols_total": 0,
+  "summary": [],
+  "robustness_analysis": {
+    "robustness_rating": "INSUFFICIENT_DATA",
+    "note": "需要至少2个品种的数据才能评估稳健性"
+  },
+  "recommendations": [
+    "请添加更多品种的历史数据文件到data/目录"
+  ]
+}

@@ -56,102 +56,225 @@ class DataValidator:
 
 class IndicatorAnalyzer:
     """技术指标分析器 - 优化版"""
+
+    GOLD_PIP_SIZE = 0.10
+    GOLD_POINT_SIZE = 0.01
+
+    @staticmethod
+    def is_gold_symbol(symbol: str) -> bool:
+        sym = (symbol or "").upper()
+        return sym.startswith("XAU") or "GOLD" in sym
+
+    @classmethod
+    def price_units(cls, symbol: str) -> Dict[str, float]:
+        """Return price point/pip sizes for strategy-level spread checks."""
+        sym = (symbol or "").upper()
+        if cls.is_gold_symbol(symbol):
+            return {"point": cls.GOLD_POINT_SIZE, "pip": cls.GOLD_PIP_SIZE}
+        if "JPY" in sym:
+            return {"point": 0.001, "pip": 0.01}
+        return {"point": 0.00001, "pip": 0.0001}
+
+    @classmethod
+    def spread_metrics(cls, symbol: str, bid: float, ask: float) -> Dict[str, float]:
+        units = cls.price_units(symbol)
+        spread = max(0.0, float(ask) - float(bid))
+        return {
+            "spread": spread,
+            "spread_points": spread / units["point"] if units["point"] > 0 else 0.0,
+            "spread_pips": spread / units["pip"] if units["pip"] > 0 else 0.0,
+            "point_size": units["point"],
+            "pip_size": units["pip"],
+        }
+
+    @staticmethod
+    def _read_float(indicators: Dict[str, Any], key: str) -> Optional[float]:
+        if not indicators or key not in indicators:
+            return None
+        try:
+            return float(indicators[key])
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _label_rsi(rsi: Optional[float]) -> str:
+        if rsi is None:
+            return "RSI缺失"
+        if rsi >= 80:
+            return f"RSI={rsi:.1f}极端超买"
+        if rsi > 65:
+            return f"RSI={rsi:.1f}偏空/超买"
+        if rsi <= 20:
+            return f"RSI={rsi:.1f}极端超卖"
+        if rsi < 35:
+            return f"RSI={rsi:.1f}偏多/超卖反弹"
+        return f"RSI={rsi:.1f}中性"
     
     @staticmethod
     def validate_and_adjust(action: str, confidence: float, indicators: Dict[str, Any],
                              symbol: str, bid: float, ask: float) -> Tuple[str, float]:
-        """验证指标一致性并调整置信度"""
-        if not indicators or action == "HOLD":
-            return action, confidence
-        
-        rsi = indicators.get('rsi', 50)
-        macd_main = indicators.get('macd_main', 0)
-        macd_signal = indicators.get('macd_signal', 0)
-        ema20 = indicators.get('ema20', 0)
-        ema50 = indicators.get('ema50', 0)
-        ema100 = indicators.get('ema100', 0)
-        stoch_k = indicators.get('stoch_k', 50)
-        stoch_d = indicators.get('stoch_d', 50)
-        
-        current_price = (bid + ask) / 2
-        
-        bullish_signals = 0
-        bearish_signals = 0
-        
-        # EMA排列分析
-        if current_price > ema20:
-            bullish_signals += 1
+        """验证指标一致性并调整置信度，保留旧调用契约。"""
+        result = IndicatorAnalyzer.evaluate_signal(action, confidence, indicators, symbol, bid, ask)
+        return result["action"], result["confidence"]
+
+    @staticmethod
+    def evaluate_signal(action: str, confidence: float, indicators: Dict[str, Any],
+                        symbol: str, bid: float, ask: float) -> Dict[str, Any]:
+        """Return a structured local signal-quality decision."""
+        original_action = (action or "HOLD").upper()
+        if original_action not in {"BUY", "SELL", "HOLD"}:
+            original_action = "HOLD"
+
+        try:
+            confidence = max(0.0, min(1.0, float(confidence)))
+        except (TypeError, ValueError):
+            confidence = 0.5
+
+        metrics = IndicatorAnalyzer.spread_metrics(symbol, bid, ask)
+        current_price = (float(bid) + float(ask)) / 2
+        rsi = IndicatorAnalyzer._read_float(indicators, "rsi")
+        macd_main = IndicatorAnalyzer._read_float(indicators, "macd_main")
+        macd_signal = IndicatorAnalyzer._read_float(indicators, "macd_signal")
+        ema50 = IndicatorAnalyzer._read_float(indicators, "ema50")
+
+        available = [
+            key for key, value in (
+                ("rsi", rsi),
+                ("macd", None if macd_main is None or macd_signal is None else macd_main - macd_signal),
+                ("ema50", ema50),
+                ("spread", metrics["spread_pips"]),
+            )
+            if value is not None
+        ]
+
+        bullish_signals = 0.0
+        bearish_signals = 0.0
+        evidence: List[str] = []
+        blocks: List[str] = []
+
+        if rsi is not None:
+            evidence.append(IndicatorAnalyzer._label_rsi(rsi))
+            if rsi >= 80 or rsi <= 20:
+                blocks.append(f"RSI极端值({rsi:.1f})")
+            elif rsi < 35:
+                bullish_signals += 1.0
+            elif rsi > 65:
+                bearish_signals += 1.0
+
+        if macd_main is not None and macd_signal is not None:
+            macd_histogram = macd_main - macd_signal
+            if macd_main > 0 and macd_histogram > 0:
+                bullish_signals += 1.0
+                evidence.append(f"MACD偏多(hist={macd_histogram:.4f})")
+            elif macd_main < 0 and macd_histogram < 0:
+                bearish_signals += 1.0
+                evidence.append(f"MACD偏空(hist={macd_histogram:.4f})")
+            elif macd_histogram > 0:
+                bullish_signals += 0.5
+                evidence.append(f"MACD弱偏多(hist={macd_histogram:.4f})")
+            elif macd_histogram < 0:
+                bearish_signals += 0.5
+                evidence.append(f"MACD弱偏空(hist={macd_histogram:.4f})")
+            else:
+                evidence.append("MACD中性")
         else:
-            bearish_signals += 1
-        
-        if ema20 > ema50:
-            bullish_signals += 1
+            evidence.append("MACD缺失")
+
+        if ema50 is not None and ema50 > 0:
+            if current_price > ema50:
+                bullish_signals += 1.0
+                evidence.append(f"价格高于EMA50({current_price:.2f}>{ema50:.2f})")
+            elif current_price < ema50:
+                bearish_signals += 1.0
+                evidence.append(f"价格低于EMA50({current_price:.2f}<{ema50:.2f})")
+            else:
+                evidence.append("价格贴近EMA50")
         else:
-            bearish_signals += 1
-        
-        if ema50 > ema100:
-            bullish_signals += 1
+            evidence.append("EMA50缺失")
+
+        max_spread_pips = float(getattr(config, "MAX_TRADE_SPREAD_PIPS", 3.0))
+        if metrics["spread_pips"] > max_spread_pips:
+            blocks.append(f"点差{metrics['spread_pips']:.1f}pips>{max_spread_pips:.1f}pips")
         else:
-            bearish_signals += 1
-        
-        # RSI分析 - 优化阈值，减少噪声
-        if rsi < 35:
-            bullish_signals += 1  # 超卖区域，看涨
-        elif rsi > 65:
-            bearish_signals += 1  # 超买区域，看跌
-        # 移除中间区域的弱信号，避免过度交易
-        
-        # MACD分析 - 合并信号避免重复计算
-        macd_histogram = macd_main - macd_signal
-        # 综合MACD主线和柱状图给出加权信号
-        if macd_main > 0 and macd_histogram > 0:
-            bullish_signals += 1.5  # 强烈看涨：主线>0且柱状图>0
-        elif macd_main < 0 and macd_histogram < 0:
-            bearish_signals += 1.5  # 强烈看跌：主线<0且柱状图<0
-        elif macd_histogram > 0:
-            bullish_signals += 0.5  # 弱看涨：仅柱状图>0
-        elif macd_histogram < 0:
-            bearish_signals += 0.5  # 弱看跌：仅柱状图<0
-        
-        # 随机指标分析
-        if stoch_k > stoch_d and stoch_k < 80:
-            bullish_signals += 0.5
-        elif stoch_k < stoch_d and stoch_k > 20:
-            bearish_signals += 0.5
-        
-        if stoch_k < 20:
-            bullish_signals += 0.5
-        elif stoch_k > 80:
-            bearish_signals += 0.5
-        
-        total_signals = bullish_signals + bearish_signals
-        consistency = max(bullish_signals, bearish_signals) / total_signals if total_signals > 0 else 0
-        
-        original_action = action
-        original_confidence = confidence
-        
-        if action == "BUY":
+            evidence.append(f"点差{metrics['spread_pips']:.1f}pips可接受")
+
+        total_directional = bullish_signals + bearish_signals
+        consistency = (
+            max(bullish_signals, bearish_signals) / total_directional
+            if total_directional > 0 else 0.0
+        )
+
+        adjusted_action = original_action
+        adjusted_confidence = confidence
+        adjusted = False
+        reason = "; ".join(evidence[:4])
+
+        def downgrade(message: str, fallback_confidence: float) -> None:
+            nonlocal adjusted_action, adjusted_confidence, adjusted, reason
+            adjusted_action = "HOLD"
+            adjusted_confidence = max(0.45, min(0.63, fallback_confidence))
+            adjusted = adjusted_action != original_action or adjusted_confidence != confidence
+            reason = message
+
+        if original_action in {"BUY", "SELL"} and not indicators:
+            downgrade("缺少技术指标，本地闸门降级HOLD", 0.45)
+        elif original_action in {"BUY", "SELL"} and blocks:
+            downgrade("; ".join(blocks), 0.55)
+        elif original_action == "BUY":
             if bullish_signals < config.MIN_INDICATOR_SIGNALS:
-                logger.warning(f"[WARN]  BUY信号但看涨指标不足 ({bullish_signals:.1f}/6，需要至少{config.MIN_INDICATOR_SIGNALS})，降为HOLD")
-                action = "HOLD"
-                confidence = 0.5
+                ratio = bullish_signals / max(config.MIN_INDICATOR_SIGNALS, 1)
+                downgrade(
+                    f"BUY看涨指标不足({bullish_signals:.1f}/{config.MIN_INDICATOR_SIGNALS})",
+                    0.65 * ratio,
+                )
             elif consistency < config.MIN_CONSISTENCY:
-                logger.warning(f"[WARN]  指标一致性低 ({consistency*100:.0f}%，需要至少{config.MIN_CONSISTENCY*100:.0f}%)，降低置信度")
-                confidence = confidence * 0.6
-        
-        elif action == "SELL":
+                reduced_confidence = confidence * 0.6
+                reason_text = f"指标一致性低({consistency*100:.0f}%<{config.MIN_CONSISTENCY*100:.0f}%)"
+                if reduced_confidence < config.MIN_CONFIDENCE:
+                    downgrade(reason_text, reduced_confidence)
+                else:
+                    adjusted_confidence = reduced_confidence
+                    adjusted = True
+                    reason = reason_text
+        elif original_action == "SELL":
             if bearish_signals < config.MIN_INDICATOR_SIGNALS:
-                logger.warning(f"[WARN]  SELL信号但看跌指标不足 ({bearish_signals:.1f}/6，需要至少{config.MIN_INDICATOR_SIGNALS})，降为HOLD")
-                action = "HOLD"
-                confidence = 0.5
+                ratio = bearish_signals / max(config.MIN_INDICATOR_SIGNALS, 1)
+                downgrade(
+                    f"SELL看跌指标不足({bearish_signals:.1f}/{config.MIN_INDICATOR_SIGNALS})",
+                    0.65 * ratio,
+                )
             elif consistency < config.MIN_CONSISTENCY:
-                logger.warning(f"[WARN]  指标一致性低 ({consistency*100:.0f}%，需要至少{config.MIN_CONSISTENCY*100:.0f}%)，降低置信度")
-                confidence = confidence * 0.6
-        
-        if original_action != action:
-            logger.info(f"[REFRESH] 指标验证: 原建议={original_action} -> 调整后={action}")
-        
-        return action, confidence
+                reduced_confidence = confidence * 0.6
+                reason_text = f"指标一致性低({consistency*100:.0f}%<{config.MIN_CONSISTENCY*100:.0f}%)"
+                if reduced_confidence < config.MIN_CONFIDENCE:
+                    downgrade(reason_text, reduced_confidence)
+                else:
+                    adjusted_confidence = reduced_confidence
+                    adjusted = True
+                    reason = reason_text
+        elif blocks:
+            reason = f"HOLD确认: {'; '.join(blocks)}"
+
+        if adjusted_action != original_action:
+            logger.info(f"[REFRESH] 指标验证: 原建议={original_action} -> 调整后={adjusted_action} ({reason})")
+        elif adjusted:
+            logger.info(f"[REFRESH] 指标验证: {original_action} 置信度 {confidence:.2f} -> {adjusted_confidence:.2f} ({reason})")
+
+        return {
+            "action": adjusted_action,
+            "confidence": max(0.0, min(1.0, adjusted_confidence)),
+            "original_action": original_action,
+            "original_confidence": confidence,
+            "adjusted": adjusted,
+            "reason": reason,
+            "bullish_signals": bullish_signals,
+            "bearish_signals": bearish_signals,
+            "consistency": consistency,
+            "spread_pips": metrics["spread_pips"],
+            "spread_points": metrics["spread_points"],
+            "available_indicators": available,
+            "blocks": blocks,
+        }
 
 
 def get_cache_key(symbol: str, bid: float, ask: float) -> str:

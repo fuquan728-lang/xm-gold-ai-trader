@@ -6,6 +6,7 @@ HTTP客户端 - 优化版
 """
 
 import requests
+import threading
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from typing import Optional, Dict, Any
@@ -84,15 +85,18 @@ class HTTPClient:
         logger.info("🔌 HTTP会话已关闭")
 
 
-# 全局HTTP客户端实例
+# 全局HTTP客户端实例 (线程安全单例)
 http_client: Optional[HTTPClient] = None
+_http_client_lock = threading.Lock()
 
 
 def get_http_client(max_retries: Optional[int] = None, 
                     pool_size: Optional[int] = None, 
                     timeout: Optional[int] = None) -> HTTPClient:
-    """获取单例HTTP客户端"""
+    """获取线程安全单例HTTP客户端"""
     global http_client
     if http_client is None:
-        http_client = HTTPClient(max_retries, pool_size, timeout)
+        with _http_client_lock:
+            if http_client is None:
+                http_client = HTTPClient(max_retries, pool_size, timeout)
     return http_client

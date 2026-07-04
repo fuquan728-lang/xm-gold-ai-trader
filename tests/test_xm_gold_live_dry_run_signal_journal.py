@@ -96,7 +96,7 @@ def test_emergency_stop_is_recorded_without_blocking_observation(tmp_path):
     assert event["orders_sent"] == 0
     assert event["final_decision"] == "BLOCK"
     assert REASON_EMERGENCY_STOP_FILE_PRESENT in event["reason_codes"]
-    assert event["account"]["login"] == 68204467
+    assert event["account"]["login"] == 100000000
     assert event["symbol"]["name"] == "GOLD_"
 
 
@@ -204,8 +204,8 @@ class FakeMT5Client:
 
     def get_account_info(self):
         raw = {
-            "login": 68204467,
-            "server": "XMGlobal-MT5 2",
+            "login": 100000000,
+            "server": "XMGlobal-MT5 X",
             "trade_mode": 0,
             "trade_allowed": True,
             "trade_expert": True,

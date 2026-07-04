@@ -15,12 +15,15 @@ REASON_MAX_ORDERS_PER_DAY = "MAX_ORDERS_PER_DAY"
 REASON_MAX_POSITIONS = "MAX_POSITIONS"
 REASON_EXISTING_MAGIC_POSITION = "EXISTING_MAGIC_POSITION"
 REASON_ORDER_CHECK_FAILED = "ORDER_CHECK_FAILED"
+REASON_ORDER_SEND_FAILED = "ORDER_SEND_FAILED"
 REASON_NO_MATCHING_POSITIONS = "NO_MATCHING_POSITIONS"
 REASON_EMERGENCY_STOP_FILE_PRESENT = "EMERGENCY_STOP_FILE_PRESENT"
 REASON_ONE_SHOT_ORDER_ALREADY_USED = "ONE_SHOT_ORDER_ALREADY_USED"
 REASON_DAILY_LOSS_LIMIT_REACHED = "DAILY_LOSS_LIMIT_REACHED"
 
 ACCOUNT_TRADE_MODE_DEMO = 0
+ORDER_CHECK_SUCCESS_RETCODES = {0, 10008, 10009}
+ORDER_SEND_SUCCESS_RETCODES = {10008, 10009, 10010}
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,7 +147,7 @@ def order_check_passed(order_check_result: Any) -> bool:
     retcode = _int_field(order_check_result, "retcode", default=None)
     if retcode is None:
         return False
-    return retcode in {0, 10008, 10009}
+    return retcode in ORDER_CHECK_SUCCESS_RETCODES
 
 
 def order_check_failure_decision(order_check_result: Any) -> ExecutionSafetyDecision:
@@ -154,6 +157,25 @@ def order_check_failure_decision(order_check_result: Any) -> ExecutionSafetyDeci
         allowed=False,
         reason_codes=(REASON_ORDER_CHECK_FAILED,),
         reasons=(f"{REASON_ORDER_CHECK_FAILED}: order_check failed retcode={retcode!r} comment={comment!r}",),
+    )
+
+
+def order_send_passed(order_send_result: Any) -> bool:
+    if order_send_result is None:
+        return False
+    retcode = _int_field(order_send_result, "retcode", default=None)
+    if retcode is None:
+        return False
+    return retcode in ORDER_SEND_SUCCESS_RETCODES
+
+
+def order_send_failure_decision(order_send_result: Any) -> ExecutionSafetyDecision:
+    retcode = _field(order_send_result, "retcode", default=None)
+    comment = _field(order_send_result, "comment", default="")
+    return ExecutionSafetyDecision(
+        allowed=False,
+        reason_codes=(REASON_ORDER_SEND_FAILED,),
+        reasons=(f"{REASON_ORDER_SEND_FAILED}: order_send failed retcode={retcode!r} comment={comment!r}",),
     )
 
 

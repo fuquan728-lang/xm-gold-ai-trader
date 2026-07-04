@@ -1,6 +1,11 @@
+# 项目主线说明
+
+当前唯一维护入口见 [ACTIVE_PROJECT.md](ACTIVE_PROJECT.md)。根目录、`MQL5/Experts/` 和启动脚本已经整理为一套主线；旧版 EA、实验脚本、一次性报告和不兼容测试已归档到 `archive/cleanup_20260701/`，以后不要作为日常入口使用。README 下方历史章节如与主线说明冲突，以 `ACTIVE_PROJECT.md` 为准。
+
 # 🚀 MT5 AI交易系统 - 企业级增强版 V3.0
 
 > New `xm-gold-ai-trader` setup instructions are included near the end of this README.
+> Safe default: use `XM_Gold_AI_Trader_SafetyGuard.mq5` for chart monitoring first. Only attach an order-sending EA after paper/demo validation and explicit live-trading approval.
 
 <div align="center">
 
@@ -64,18 +69,19 @@ pip install -r requirements.txt
 ### 2. 配置环境
 ```powershell
 copy .env.example .env
-# 编辑.env文件，设置您的DeepSeek API密钥
+# DeepSeek API Key 请设置到Windows用户/系统环境变量，不写入.env
 ```
 
 ### 3. 启动服务
 ```powershell
-python mt5_ai_service.py
+python mt5_ai_service.py --mode file
 ```
 
 ### 4. 安装EA
-- 复制 `MQL5/Experts/AI_Trader_Integrated_Socket.mq5` 到MT5
-- 在MetaEditor中编译
-- 添加到图表并配置参数
+- 只读监控优先：复制并编译 `MQL5/Experts/XM_Gold_AI_Trader_SafetyGuard.mq5`
+- 自动交易仅在 paper/demo 验证后使用：`AI_Trader_V3.2_Integrated.mq5` 默认要求 demo 账户且禁止 live
+- 不要用 Legacy `AI_Trader_V2.1_Safe.mq5` 作为自动交易入口；它默认 `InpAllowOrderExecution=false`
+- 不要使用 Legacy Socket EA 作为新安装入口
 
 **详细步骤请参阅：[快速开始指南](docs/01-项目概述/QUICK_START.md)**
 
@@ -134,7 +140,7 @@ XM Global MT5/
 ```env
 # DeepSeek AI配置
 USE_DEEPSEEK=true
-DEEPSEEK_API_KEY=sk-您的密钥
+DEEPSEEK_API_KEY=<set-in-system-environment>
 
 # 服务配置
 SOCKET_HOST=127.0.0.1

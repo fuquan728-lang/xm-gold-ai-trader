@@ -21,27 +21,11 @@ if errorlevel 1 (
     exit /b 1
 )
 echo.
+echo.
 echo ================================================
-echo    MT5 AI Trading System V3.1
+echo    MT5 AI Trading System - canonical file mode
 echo ================================================
 echo.
-echo Select launch mode:
-echo [1] File mode (recommended - matches EA)
-echo [2] Socket mode
-echo [3] Async-optimized
-echo [4] Integrated mode
-echo [5] Custom args
-echo.
-set /p MODE="Enter mode (1-5): "
-echo.
-if "%MODE%"=="1" (python mt5_ai_service.py --mode file)
-if "%MODE%"=="2" (python mt5_ai_service.py --mode socket)
-if "%MODE%"=="3" (python mt5_ai_service_optimized.py --mode file)
-if "%MODE%"=="4" (python ai_service_integrated.py)
-if "%MODE%"=="5" (
-    set /p ARGS="Enter startup args: "
-    python mt5_ai_service.py %ARGS%
-)
-if not defined MODE (python mt5_ai_service.py --mode file)
+python mt5_ai_service.py --mode file --log-file logs/ai_service.log
 echo.
 pause

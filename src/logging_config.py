@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
@@ -14,7 +15,11 @@ def configure_logging(
     path.parent.mkdir(parents=True, exist_ok=True)
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-    file_handler = logging.FileHandler(path, encoding="utf-8")
+    file_handler = RotatingFileHandler(
+        path, encoding="utf-8",
+        maxBytes=10 * 1024 * 1024,  # 10MB
+        backupCount=5
+    )
     file_handler.setFormatter(formatter)
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)

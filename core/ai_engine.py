@@ -9,7 +9,7 @@ import json
 import re
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, List, Any, Tuple
 from .logger import logger
 from .http_client import get_http_client
@@ -17,6 +17,7 @@ from .cache import global_cache
 from . import config
 from .weight_optimizer import get_weight_optimizer, WeightOptimizer, TradeSignal
 from .mql5_data import get_mql5_data_manager
+from .validator import IndicatorAnalyzer
 
 
 class AIAnalyzer:
@@ -45,7 +46,14 @@ class AIAnalyzer:
     def has_valid_api_key(self) -> bool:
         """检查DeepSeek API Key是否看起来可用。"""
         api_key = (self.api_key or "").strip()
-        return bool(api_key) and api_key not in self.INVALID_API_KEYS and not api_key.lower().startswith("your-")
+        normalized = api_key.lower().replace("_", "-")
+        placeholder_tokens = ("your", "placeholder", "api-key-here", "deepseek-api-key-here")
+        return (
+            bool(api_key)
+            and api_key not in self.INVALID_API_KEYS
+            and normalized.startswith("sk-")
+            and not any(token in normalized for token in placeholder_tokens)
+        )
 
     def is_deepseek_available(self) -> bool:
         """DeepSeek是否已启用且已配置有效密钥。"""
@@ -67,9 +75,10 @@ class AIAnalyzer:
         """构建优化后的提示词 - V3.2增强版（集成实时账户数据）"""
         current_price = (bid + ask) / 2
         spread = ask - bid
+        spread_metrics = IndicatorAnalyzer.spread_metrics(symbol, bid, ask)
         now_str = datetime.fromtimestamp(current_time).strftime('%Y-%m-%d %H:%M:%S')
         # UTC时间辅助判断市场活跃时段
-        utc_hour = datetime.utcfromtimestamp(current_time).hour
+        utc_hour = datetime.fromtimestamp(current_time, timezone.utc).hour
         
         # 判断市场时段
         if 7 <= utc_hour <= 16:
@@ -84,6 +93,14 @@ class AIAnalyzer:
         if include_account_context:
             account_context_section = self._build_account_context_section(symbol)
         
+        # 获取基本面经济数据上下文（P3-2集成）
+        economic_context_section = ""
+        try:
+            from core.economic_calendar import get_economic_context_for_ai
+            economic_context_section = get_economic_context_for_ai()
+        except Exception as e:
+            logger.debug(f"经济数据上下文获取失败，跳过: {e}")
+        
         prompt = f"""你是一位专业的高级量化交易分析师，拥有20年外汇与大宗商品交易经验。
 
 【角色与纪律】
@@ -91,13 +108,17 @@ class AIAnalyzer:
 - 你的首要目标是保护本金，其次才是追求盈利
 - 绝不在指标信号矛盾时强行开仓
 - 决策时需综合考虑实时账户状况和已有持仓
+- reason只能引用下方明确给出的数值，禁止编造未提供的RSI/MACD/EMA/点差数据
 
 【市场基本数据】
 - 交易品种: {symbol}
 - 当前时间: {now_str} (UTC{utc_hour}:00)
 - {session_hint}
 - Bid: {bid} | Ask: {ask} | 中间价: {current_price}
-- 点差: {spread:.5f} ({spread/current_price*10000:.1f}点)
+- 点差: {spread:.5f} price = {spread_metrics["spread_points"]:.1f} points = {spread_metrics["spread_pips"]:.1f} pips
+
+【基本面与宏观经济环境】
+{economic_context_section}
 
 【返回格式要求 - 严格遵守】
 只返回纯JSON，不要任何其他文字、代码块标记或解释：
@@ -115,34 +136,56 @@ class AIAnalyzer:
   - RSI > 80 或 RSI < 20 → 必须HOLD（极端超买/超卖，行情随时反转）
   - 点差异常偏大（> 正常值3倍）→ 必须HOLD（流动性不足）
 
-第二层（多指标确认）：
-  - 至少3个指标方向一致才可发出BUY/SELL信号
-  - 只有1-2个指标一致 → HOLD
+第二层（多指标确认——与风控系统共用以下4项核心指标）：
+  核心指标：①RSI ②MACD ③价格vsEMA50 ④点差/流动性
+  - 至少2个核心指标方向一致才可发出BUY/SELL信号
+  - 只有1个或0个核心指标一致 → HOLD
+  - 点差异常偏高(>3pip)时，即使其他指标一致也必须HOLD
 
-第三层（置信度校准 - 注意增加随机性）：
+第三层（置信度校准——覆盖 BUY/SELL/HOLD 所有情况）：
+  【交易信号类】
   - 5个指标全部一致 + 多周期共振强 → confidence 0.88-0.95
   - 5个指标全部一致 → confidence 0.82-0.90
   - 4个指标一致 + 趋势明确 → confidence 0.75-0.82
   - 4个指标一致 → confidence 0.70-0.78
   - 3个指标一致 + 风险可控 → confidence 0.65-0.72
   - 3个指标一致 → confidence 0.58-0.65
-  - 不足3个 → 必须HOLD
-  - 重要：避免频繁返回相同值(0.72/0.82)，在不同情况下返回不同置信度
+
+  【HOLD信号类——HOLD也有置信度】
+  - 账户余额为负/保证金不足/爆仓风险 → HOLD confidence 0.90-0.98（铁律）
+  - 账户已有较大回撤 + 指标矛盾 → HOLD confidence 0.75-0.90
+  - 低流动性时段 + 指标矛盾 → HOLD confidence 0.68-0.84
+  - 不足3个指标一致，但无极端风险 → HOLD confidence 0.55-0.74
+  - 信号不足但无明显矛盾 → HOLD confidence 0.45-0.60
+
+  重要：HOLD 的信心来自"为何不该交易"的理由强度，理由越充分 confidence 越高。
+  confidence必须稳定反映证据强弱；相同证据可以输出相同confidence，禁止为了避免重复而随机改变数值。
 
 第四层（账户风险考量）：
+  - 余额为负 → 不管技术面多好，必须HOLD，confidence≥0.9（这是硬约束）
   - 当前品种已有持仓过重 → 降低仓位或放弃交易
   - 保证金水平不足 → 必须HOLD或大幅降低仓位
   - 账户已有较大回撤 → 建议保守或观望
 
 置信度阈值: {config.MIN_CONFIDENCE}（低于此值的信号视为无效）
 【重要】置信度等级说明：
+  【交易类】
   - 0.88-0.95：强共振（5指标全一致+多周期共振）
   - 0.82-0.90：强信号（5指标全一致）
   - 0.75-0.82：中等偏强（4指标一致+明确趋势）
   - 0.70-0.78：中等信号（4指标一致）
   - 0.65-0.72：偏弱信号（3指标一致+风险可控）
   - 0.58-0.65：边缘信号（3指标一致，谨慎）
-  - <0.58：信号不足 → 必须HOLD
+
+  【HOLD类——与交易类并列，不要差别对待】
+  - 0.90-0.98：绝对HOLD（资金/爆仓硬约束）
+  - 0.75-0.90：强HOLD（回撤+矛盾）
+  - 0.68-0.84：中等HOLD（流动性+矛盾）
+  - 0.55-0.74：弱HOLD（指标不足）
+  - 0.45-0.60：边缘HOLD（无明确信号）
+  - <0.45：信号模糊 → 不应主动输出此范围
+
+  ⚠️ confidence应可复现：根据当前证据选择最贴切的区间值，不要随机化，也不要为了“看起来不同”而改变。
 """
         
         # 添加账户上下文部分
@@ -170,6 +213,10 @@ class AIAnalyzer:
 
 只有以上6项检查至少4项通过时，才可发出BUY/SELL信号。否则选择HOLD。
 
+【关键】无论你最终输出BUY、SELL还是HOLD，confidence都必须反映你对该建议的真实把握程度。
+HOLD不等于低信心：如果第5项"账户风险"不通过（如余额为负），HOLD的confidence应接近0.95。
+只有当你自己也拿不准"该不该持有"时，HOLD的confidence才应该偏低。
+
 请综合考虑市场数据、技术分析和实时账户状况，给出最终决策："""
         return prompt
     
@@ -186,6 +233,7 @@ class AIAnalyzer:
         
         return f"""
 【技术指标分析】
+- 下面是本次请求的唯一技术指标快照；reason必须以这些数值为准，禁止引用其他RSI/MACD/EMA数值。
 - RSI(14): {rsi:.1f} ({rsi_status})
 - MACD主: {macd_main:.4f} | 信号: {macd_signal:.4f} | 柱状图: {macd_histogram:.4f}
 - MACD状态: {macd_status}
@@ -446,12 +494,12 @@ class AIAnalyzer:
         return section
     
     def call_api(self, prompt: str) -> Optional[Dict[str, Any]]:
-        """调用DeepSeek API"""
+        """调用DeepSeek API（带智能重试）"""
         if not self.is_deepseek_available():
             logger.warning(f"[WARN]  DeepSeek不可用: {self.get_deepseek_status()}")
             return None
         
-        logger.info("📡 正在调用DeepSeek API...")
+        logger.info("正在调用DeepSeek API...")
         
         headers = {
             "Content-Type": "application/json",
@@ -461,40 +509,58 @@ class AIAnalyzer:
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": "你是专业量化交易分析师。严格遵循层次化决策规则：优先考虑风险，多指标一致才可交易。只返回纯JSON，格式：{\"action\":\"BUY/SELL/HOLD\",\"confidence\":0.0-1.0,\"reason\":\"分析原因\"}。绝不输出JSON以外的内容。"},
+                {"role": "system", "content": "你是专业量化交易分析师。严格遵循层次化决策规则：优先考虑风险，多指标一致才可交易。HOLD（不交易）是有效的交易决策，当你确定不该交易时，confidence应反映你的确信程度而非0。只返回纯JSON，格式：{\"action\":\"BUY/SELL/HOLD\",\"confidence\":0.0-1.0,\"reason\":\"分析原因\"}。绝不输出JSON以外的内容。"},
                 {"role": "user", "content": prompt}
             ],
-            "temperature": 0.2,  # 降低温度使输出更稳定一致
-            "max_tokens": 300    # 减少token，只需要简洁JSON
+            "temperature": 0.4,
+            "max_tokens": 300
         }
         
-        try:
-            response = self.http_client.post(
-                self.api_url,
-                json_payload=payload,
-                headers=headers
-            )
-            
-            result = response.json()
-            content = result["choices"][0]["message"]["content"]
-            
-            logger.debug(f"📤 AI原始响应: {content[:200]}...")
-            
-            parsed = self._extract_json(content)
-            if parsed:
-                logger.info("[OK] AI响应解析成功")
-                return parsed
-            
-            logger.warning("[WARN]  JSON解析失败，返回默认HOLD")
-            return {
-                "action": "HOLD",
-                "confidence": 0.5,
-                "reason": "AI响应解析失败"
-            }
-            
-        except Exception as e:
-            logger.error(f"[ERR] API调用失败: {str(e)}")
-            return None
+        last_error = None
+        for attempt in range(config.MAX_RETRIES if hasattr(config, 'MAX_RETRIES') else 1):
+            try:
+                if attempt > 0:
+                    backoff = min(2 ** attempt, 8)  # 指数退避: 2s, 4s, 8s max
+                    logger.info(f"重试 {attempt}/{config.MAX_RETRIES} (等待{backoff}s)...")
+                    time.sleep(backoff)
+                
+                response = self.http_client.post(
+                    self.api_url,
+                    json_payload=payload,
+                    headers=headers
+                )
+                
+                result = response.json()
+                content = result["choices"][0]["message"]["content"]
+                
+                logger.debug(f"AI原始响应: {content[:200]}...")
+                
+                parsed = self._extract_json(content)
+                if parsed:
+                    logger.info("[OK] AI响应解析成功")
+                    return parsed
+                
+                logger.warning("[WARN]  JSON解析失败，返回默认HOLD")
+                return {
+                    "action": "HOLD",
+                    "confidence": 0.5,
+                    "reason": "AI响应解析失败"
+                }
+                
+            except Exception as e:
+                last_error = str(e)
+                status_code = getattr(getattr(e, "response", None), "status_code", None)
+                if status_code in (401, 403):
+                    logger.error(f"[ERR] API认证失败 ({status_code}): 请检查DEEPSEEK_API_KEY或关闭USE_DEEPSEEK")
+                    break
+                error_msg = f"[ERR] API调用失败 (尝试 {attempt+1}/{config.MAX_RETRIES}): {last_error[:120]}"
+                if attempt < config.MAX_RETRIES - 1:
+                    logger.warning(error_msg)
+                else:
+                    logger.error(error_msg)
+        
+        logger.error(f"[ERR] API调用最终失败: {last_error}")
+        return None
     
     def _extract_json(self, content: str) -> Optional[Dict]:
         """更健壮的JSON提取"""
@@ -608,194 +674,146 @@ class AIAnalyzer:
         # 否则使用安全的保守策略（无可交易信号时返回HOLD）
         # 注意：无指标数据时不应产生虚假的交易信号
         logger.warning("[WARN]  无指标数据，返回保守HOLD（防止随机信号触发实盘交易）")
-        return "HOLD", 0.1, "安全策略: 无指标数据，不具备交易条件"
+        return "HOLD", 0.55, "安全策略: 无指标数据，不具备交易条件"
     
     def _get_smart_fallback_strategy(self, symbol: str, bid: float, ask: float,
                                     indicators: Dict[str, Any],
                                     multi_timeframe: Optional[Dict[str, Any]] = None) -> Tuple[str, float, str]:
         """
-        智能后备策略 - 基于技术指标和市场数据的决策
-        
-        算法逻辑:
-        1. 分析技术指标的一致性
-        2. 计算看涨/看跌信号强度
-        3. 基于多个指标加权决策
-        4. 设置合理的置信度
+        增强后备策略 V2 — 基于EA实际提供的4个核心指标决策
+
+        EA实际发送的指标: rsi, macd_main, macd_signal, ema50
+        注意: ema20/ema100/stochastics 不在EA数据中, 不做依赖
+
+        决策流程:
+        1. 计算综合信号分数(bullish/bearish)
+        2. 一致性检查 + 点差过滤
+        3. 输出BUY/SELL/HOLD + 置信度
         """
         try:
-            # 提取指标数据
-            rsi = indicators.get('rsi', 50.0)
-            macd_main = indicators.get('macd_main', 0.0)
-            macd_signal = indicators.get('macd_signal', 0.0)
-            ema20 = indicators.get('ema20', bid)
-            ema50 = indicators.get('ema50', bid)
-            ema100 = indicators.get('ema100', bid)
-            stoch_main = indicators.get('stoch_main', 50.0)
-            stoch_signal = indicators.get('stoch_signal', 50.0)
-            
-            current_price = (bid + ask) / 2
-            spread = ask - bid
-            
-            # 计算看涨/看跌信号分数
-            bullish_score = 0
-            bearish_score = 0
-            
-            # 1. RSI分析
-            if rsi < 35:
-                bullish_score += 2  # 超卖区域，强烈看涨
-            elif rsi > 65:
-                bearish_score += 2  # 超买区域，强烈看跌
+            rsi = float(indicators.get('rsi', 50.0))
+            macd_main = float(indicators.get('macd_main', 0.0))
+            macd_signal = float(indicators.get('macd_signal', 0.0))
+            ema50 = float(indicators.get('ema50', 0.0))
+
+            mid = (bid + ask) / 2
+            spread_pips = (ask - bid) / 0.10 if mid > 0 else 0
+
+            # ═══ 点差安全过滤 ═══
+            is_gold = symbol.upper().startswith('XAU') or 'GOLD' in symbol.upper() or symbol.upper().endswith('_')
+            max_ok_spread = 8.0 if is_gold else 4.0
+            if spread_pips > max_ok_spread:
+                return "HOLD", 0.55, f"备选: 点差{spread_pips:.1f}>{max_ok_spread:.0f}pips, 流动性不足"
+
+            bullish = 0
+            bearish = 0
+            reasons = []
+
+            # ═══ 1. RSI 分析 (权重最高) ═══
+            if rsi < 25:
+                bullish += 4; reasons.append(f"RSI深度超卖({rsi:.0f})")
+            elif rsi < 35:
+                bullish += 3; reasons.append(f"RSI超卖({rsi:.0f})")
             elif rsi < 45:
-                bullish_score += 1  # 偏超卖，弱看涨
+                bullish += 1
+            elif rsi > 75:
+                bearish += 4; reasons.append(f"RSI深度超买({rsi:.0f})")
+            elif rsi > 65:
+                bearish += 3; reasons.append(f"RSI超买({rsi:.0f})")
             elif rsi > 55:
-                bearish_score += 1  # 偏超买，弱看跌
-            
-            # 2. MACD分析
-            macd_histogram = macd_main - macd_signal
-            if macd_main > 0 and macd_histogram > 0:
-                bullish_score += 3  # 强烈看涨
-            elif macd_main < 0 and macd_histogram < 0:
-                bearish_score += 3  # 强烈看跌
-            elif macd_histogram > 0:
-                bullish_score += 1  # 弱看涨
-            elif macd_histogram < 0:
-                bearish_score += 1  # 弱看跌
-            
-            # 3. EMA排列分析
-            if current_price > ema20 > ema50 > ema100:
-                bullish_score += 3  # 完美多头排列
-            elif current_price < ema20 < ema50 < ema100:
-                bearish_score += 3  # 完美空头排列
-            elif current_price > ema20 > ema50:
-                bullish_score += 2  # 短期多头排列
-            elif current_price < ema20 < ema50:
-                bearish_score += 2  # 短期空头排列
-            elif current_price > ema20:
-                bullish_score += 1  # 价格在EMA20之上
-            elif current_price < ema20:
-                bearish_score += 1  # 价格在EMA20之下
-            
-            # 4. 随机指标分析
-            if stoch_main < 20 and stoch_signal < 20:
-                bullish_score += 2  # 双超卖
-            elif stoch_main > 80 and stoch_signal > 80:
-                bearish_score += 2  # 双超买
-            elif stoch_main > stoch_signal and stoch_main < 50:
-                bullish_score += 1  # 金叉在下方区域
-            elif stoch_main < stoch_signal and stoch_main > 50:
-                bearish_score += 1  # 死叉在上方区域
-            
-            # 5. 价格相对位置分析
-            if current_price > (ema20 + ema50 + ema100) / 3:
-                bullish_score += 1  # 价格在均线之上
-            else:
-                bearish_score += 1  # 价格在均线之下
-            
-            # 多时间框架分析（带动态权重）
-            mtf_signals = {}  # 记录各时间框架信号
-            if multi_timeframe:
-                current_weights = self.weight_optimizer.get_current_weights()
-                
-                weighted_bullish = 0.0
-                weighted_bearish = 0.0
-                
-                for timeframe in ['h1', 'h4', 'd1']:
-                    if timeframe not in multi_timeframe:
-                        continue
-                        
-                    tf_data = multi_timeframe[timeframe]
-                    indicators_tf = tf_data.get('indicators', {})
-                    
-                    # 分析MACD方向
-                    macd_main = indicators_tf.get('macd_main', 0)
-                    macd_signal = indicators_tf.get('macd_signal', 0)
-                    macd_histogram = macd_main - macd_signal
-                    
-                    # 获取权重
-                    tf_weight = current_weights.get(timeframe, 0.33)
-                    
-                    # 记录时间框架信号
-                    if macd_histogram > 0.0001:
-                        mtf_signals[timeframe] = "BUY"
-                        weighted_bullish += tf_weight * 3  # 看涨信号（加权）
-                    elif macd_histogram < -0.0001:
-                        mtf_signals[timeframe] = "SELL"
-                        weighted_bearish += tf_weight * 3  # 看跌信号（加权）
+                bearish += 1
+
+            # ═══ 2. MACD 分析 ═══
+            macd_hist = macd_main - macd_signal
+            macd_hist_norm = macd_hist / (mid * 0.001 + 1e-8)  # 归一化
+            macd_noise_threshold = abs(mid * 0.0003)  # MACD线接近0 → 无信号
+
+            if abs(macd_main) < macd_noise_threshold and abs(macd_hist) < macd_noise_threshold:
+                pass  # MACD flat → 不加分
+            elif macd_main > 0 and macd_hist > 0:
+                bullish += 3; reasons.append("MACD正值+柱状图向上")
+            elif macd_main < 0 and macd_hist < 0:
+                bearish += 3; reasons.append("MACD负值+柱状图向下")
+            elif macd_hist > 0 and macd_hist > macd_noise_threshold:
+                bullish += 2; reasons.append("MACD柱转正")
+            elif macd_hist < 0 and macd_hist < -macd_noise_threshold:
+                bearish += 2; reasons.append("MACD柱转负")
+
+            # MACD背离检测 (histogram在缩小时可能反转)
+
+            # ═══ 3. EMA50 趋势 ═══
+            ema_noise = 0.1  # 0.1% 以内视为无趋势
+            price_vs_ema = 0.0  # 默认无偏离
+            if ema50 > 0:
+                price_vs_ema = (mid - ema50) / ema50 * 100
+
+                if price_vs_ema > 0.5:
+                    bullish += 2; reasons.append(f"价格>EMA50({price_vs_ema:.1f}%)")
+                elif price_vs_ema < -0.5:
+                    bearish += 2; reasons.append(f"价格<EMA50({abs(price_vs_ema):.1f}%)")
+                elif price_vs_ema > ema_noise:
+                    bullish += 1
+                elif price_vs_ema < -ema_noise:
+                    bearish += 1
+                # else: 0 ± 0.1% → 无EMA信号
+
+                # 大幅偏离后可能回归均值
+                if abs(price_vs_ema) > 2.0:
+                    if price_vs_ema > 0:
+                        bearish += 1; reasons.append("大幅高于EMA50, 均值回归风险")
                     else:
-                        mtf_signals[timeframe] = "HOLD"
-                
-                # 应用权重调整到分数
-                if weighted_bullish > 0 or weighted_bearish > 0:
-                    # 将权重转换为整数分数
-                    bullish_score += int(weighted_bullish * 2)
-                    bearish_score += int(weighted_bearish * 2)
-                    
-                    # 记录权重信息到reason
-                    reason_suffix = f"[权重: {current_weights}]"
-                    if 'reason_prefix' not in locals():
-                        if weighted_bullish > weighted_bearish:
-                            reason_prefix = f"多时间框架看涨（加权: {weighted_bullish:.2f}）{reason_suffix}"
-                        elif weighted_bearish > weighted_bullish:
-                            reason_prefix = f"多时间框架看跌（加权: {weighted_bearish:.2f}）{reason_suffix}"
-                        else:
-                            reason_prefix = f"多时间框架分歧{reason_suffix}"
-            
-            # 决策逻辑
-            total_signals = max(bullish_score + bearish_score, 1)  # 避免除零
-            
-            if bullish_score > bearish_score:
-                # 看涨信号更强
-                signal_strength = (bullish_score - bearish_score) / total_signals
-                if signal_strength > 0.3:
-                    action = "BUY"
-                    confidence = min(0.5 + signal_strength, 0.85)
-                    reason = f"智能后备: 看涨信号占优 (强度: {signal_strength:.2f})"
-                else:
-                    action = "HOLD"
-                    confidence = 0.6
-                    reason = "智能后备: 看涨信号不足，建议观望"
-            
-            elif bearish_score > bullish_score:
-                # 看跌信号更强
-                signal_strength = (bearish_score - bullish_score) / total_signals
-                if signal_strength > 0.3:
-                    action = "SELL"
-                    confidence = min(0.5 + signal_strength, 0.85)
-                    reason = f"智能后备: 看跌信号占优 (强度: {signal_strength:.2f})"
-                else:
-                    action = "HOLD"
-                    confidence = 0.6
-                    reason = "智能后备: 看跌信号不足，建议观望"
-            
+                        bullish += 1; reasons.append("大幅低于EMA50, 均值回归可能")
+
+            # ═══ 4. 综合指标一致性 ═══
+            # 使用noise过滤后的方向（与主体分析一致）
+            rsi_dir = 1 if rsi < 45 else (-1 if rsi > 55 else 0)
+            macd_dir = 0
+            if abs(macd_main) >= macd_noise_threshold or abs(macd_hist) >= macd_noise_threshold:
+                macd_dir = 1 if macd_hist > 0 else (-1 if macd_hist < 0 else 0)
+            ema_dir = 0
+            if ema50 > 0 and abs(price_vs_ema) > ema_noise:
+                ema_dir = 1 if price_vs_ema > 0 else -1
+
+            consistent_bullish = sum(1 for d in [rsi_dir, macd_dir, ema_dir] if d > 0)
+            consistent_bearish = sum(1 for d in [rsi_dir, macd_dir, ema_dir] if d < 0)
+
+            # 至少2个指标同向才开仓
+            if consistent_bullish >= 2:
+                bullish += 2; reasons.append(f"{consistent_bullish}/3指标一致看涨")
+            if consistent_bearish >= 2:
+                bearish += 2; reasons.append(f"{consistent_bearish}/3指标一致看跌")
+
+            # ═══ 5. 决策 ═══
+            total = bullish + bearish
+            if total == 0:
+                return "HOLD", 0.50, "备选: 无有效指标信号"
+
+            net_score = bullish - bearish
+            strength = abs(net_score) / total
+
+            # 降低阈值: >0.15即可产生信号 (原0.30太保守)
+            if net_score > 0 and strength > 0.15:
+                action = "BUY"
+                conf = 0.55 + strength * 0.40  # 0.55 ~ 0.95
+                reason_str = f"备选BUY: {'; '.join(reasons[:4])} (强度={strength:.2f})"
+            elif net_score < 0 and strength > 0.15:
+                action = "SELL"
+                conf = 0.55 + strength * 0.40
+                reason_str = f"备选SELL: {'; '.join(reasons[:4])} (强度={strength:.2f})"
             else:
-                # 信号平衡或没有明显信号
                 action = "HOLD"
-                confidence = 0.5
-                reason = "智能后备: 多空信号平衡，市场震荡"
-            
-            # 最终验证：确保置信度在合理范围
-            confidence = max(0.3, min(0.9, confidence))
-            
-            # 记录交易信号到权重优化器
-            if 'mtf_signals' in locals():
-                signal = TradeSignal(
-                    timestamp=time.time(),
-                    symbol=symbol,
-                    action=action,
-                    confidence=confidence,
-                    bid=bid,
-                    ask=ask,
-                    multi_timeframe_signals=mtf_signals
-                )
-                self.weight_optimizer.record_signal(signal)
-            
-            logger.info(f"🎯 智能后备策略: {action} | 置信度: {confidence:.2f} | 原因: {reason}")
-            return action, confidence, reason
-            
+                conf = 0.50 + strength * 0.30
+                reason_str = f"备选HOLD: 方向不足 ({bullish}B/{bearish}S) {'; '.join(reasons[:3])}"
+
+            confidence = round(min(conf, 0.85), 2)
+
+            logger.info(f"[FALLBACK] {action} conf={confidence:.2f} "
+                       f"bullish={bullish} bearish={bearish} | {reason_str[:80]}")
+            return action, confidence, reason_str
+
         except Exception as e:
-            logger.error(f"[ERR] 智能后备策略失败: {str(e)}，返回安全HOLD")
-            # 失败时返回安全HOLD而非随机策略，避免虚假信号
-            return "HOLD", 0.1, f"安全策略: 指标分析异常 ({str(e)[:50]})"
+            logger.error(f"[ERR] 后备策略失败: {e}")
+            return "HOLD", 0.1, f"备选异常: {str(e)[:50]}"
     
     def _build_account_context_section(self, symbol: str) -> str:
         """构建账户上下文部分"""
@@ -813,7 +831,14 @@ class AIAnalyzer:
             margin_level = account_data.get("margin_level", 0.0)
             floating_profit = account_data.get("floating_profit", 0.0)
             
-            # 计算账户健康度
+            # 检查数据完整性：File模式下EA不推送实时账户数据，所有值均为0
+            # 此时不应将虚假数据传给AI，避免AI因零值而误判账户风险
+            if balance <= 0 and equity <= 0 and margin_free <= 0:
+                return """
+【账户实时状态 - 数据暂不可用】
+注意: 当前无法获取MT5实时账户数据（EA使用File模式通信时，账户数据不通过文件推送）。
+决策时请仅基于市场技术指标分析，忽略账户因素。账户风险由独立的风险管理系统处理。
+"""
             account_health = "优秀"
             if margin_level < 100.0:
                 account_health = "危险 (保证金水平<100%)"
@@ -846,7 +871,7 @@ class AIAnalyzer:
 - 账户余额: ${balance:.2f}
 - 账户净值: ${equity:.2f} (浮动盈亏: ${floating_profit:.2f})
 - 保证金使用: ${margin_used:.2f} (可用保证金: ${margin_free:.2f})
-- 保证金水平: {margin_level:.1f}% (账户健康度: {account_health})
+- 保证金水平: {'N/A (无持仓)' if margin_level == float('inf') else f'{margin_level:.1f}%'} (账户健康度: {account_health})
 - 总持仓数量: {total_position_count}个 (总手数: {total_position_volume:.2f})
 """
             

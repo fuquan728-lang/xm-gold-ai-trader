@@ -22,12 +22,14 @@ from enum import Enum
 
 try:
     import websockets
-    from websockets.server import WebSocketServerProtocol
     from websockets.exceptions import ConnectionClosed, ConnectionClosedOK, ConnectionClosedError
     HAS_WEBSOCKETS = True
 except ImportError:
+    websockets = None
     HAS_WEBSOCKETS = False
     print("[WARN] Warning: websockets library not installed. WebSocket mode unavailable.")
+
+WebSocketServerProtocol = Any
 
 from core.logger import logger
 

@@ -136,22 +136,34 @@ echo.
 :: ============================================================
 echo [4/6] Installing project dependencies...
 
-"%VENV_PYTHON%" -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn --quiet
+:: Mirror fallback: try Tsinghua first, fall back to pypi.org
+set MIRROR_PRIMARY=https://pypi.tuna.tsinghua.edu.cn/simple
+set MIRROR_FALLBACK=https://pypi.org/simple
+set PIP_MIRROR=%MIRROR_PRIMARY%
+set MIRROR_USED=tsinghua
+
+"%VENV_PYTHON%" -m pip install --upgrade pip -i "%PIP_MIRROR%" --trusted-host pypi.tuna.tsinghua.edu.cn --quiet
+if errorlevel 1 (
+    echo [WARN] Tsinghua mirror unavailable, switching to pypi.org...
+    set PIP_MIRROR=%MIRROR_FALLBACK%
+    set MIRROR_USED=pypi.org
+    "%VENV_PYTHON%" -m pip install --upgrade pip --quiet
+)
 
 set REQ_FILE=%~dp0requirements.txt
 if not exist "%REQ_FILE%" (
     echo [WARN] requirements.txt not found, installing default set...
-    "%VENV_PIP%" install requests python-dotenv websockets Flask pandas numpy sqlalchemy scikit-learn joblib matplotlib psutil aiohttp -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
+    "%VENV_PIP%" install requests python-dotenv websockets Flask pandas numpy sqlalchemy scikit-learn joblib matplotlib psutil aiohttp -i "!PIP_MIRROR!"
     goto verify_install
 )
 
 echo [INFO] Installing from: %REQ_FILE%
-echo        Mirror: https://pypi.tuna.tsinghua.edu.cn/simple
-"%VENV_PIP%" install -r "%REQ_FILE%" -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
+echo        Mirror: !MIRROR_USED!
+"%VENV_PIP%" install -r "%REQ_FILE%" -i "!PIP_MIRROR!"
 
 echo.
 echo [INFO] Installing additional packages: psutil, aiohttp
-"%VENV_PIP%" install psutil aiohttp -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
+"%VENV_PIP%" install psutil aiohttp -i "!PIP_MIRROR!"
 
 :verify_install
 echo.
@@ -187,9 +199,16 @@ if not exist "%ENV_FILE%" (
         echo # MT5 AI Trading System - Environment Config
         echo # Edit this file with your actual settings
         echo.
-        echo DEEPSEEK_API_KEY=your-deepseek-api-key-here
+        echo # DEEPSEEK_API_KEY is intentionally not stored here.
+        echo # Set it in Windows user/system environment instead.
         echo DEEPSEEK_API_URL=https://api.deepseek.com/v1/chat/completions
-        echo USE_DEEPSEEK=false
+        echo USE_DEEPSEEK=true
+        echo ALLOW_FALLBACK_TRADING=false
+        echo MIN_CONFIDENCE=0.65
+        echo MIN_INDICATOR_SIGNALS=3
+        echo MIN_CONSISTENCY=0.65
+        echo MAX_TRADE_SPREAD_PIPS=3.0
+        echo ENABLE_RL_MODEL=false
         echo.
         echo MT5_EA_HOST=127.0.0.1
         echo SOCKET_HOST=127.0.0.1
@@ -204,38 +223,26 @@ if not exist "%ENV_FILE%" (
         echo LOG_LEVEL=INFO
         echo LOG_DIR=%~dp0logs
     ) > "%ENV_FILE%"
-    echo [ OK ] .env created - EDIT IT with your API key!
+    echo [ OK ] .env created - set DEEPSEEK_API_KEY in Windows environment, not in .env.
 )
 
 :: Create launcher
 set LAUNCHER=%~dp0launch_ai_service.bat
 (
     echo @echo off
+    echo chcp 65001 ^> nul
+    echo set PYTHONIOENCODING=utf-8
+    echo set PYTHONUTF8=1
     echo cd /d "%~dp0"
-    echo call "%VENV_DIR%\Scripts\activate.bat"
-    echo echo.
-    echo echo ================================================
-    echo echo    MT5 AI Trading System V3.1
-    echo echo ================================================
-    echo echo.
-    echo echo Select launch mode:
-    echo echo [1] File mode ^(recommended - matches default EA^)
-    echo echo [2] Socket mode
-    echo echo [3] Async-optimized ^(File^)
-    echo echo [4] Integrated mode
-    echo echo [5] Custom args
-    echo echo.
-    echo set /p MODE="Enter mode ^(1-5^): "
-    echo.
-    echo if "%%MODE%%"=="1" ^(python mt5_ai_service.py --mode file^)
-    echo if "%%MODE%%"=="2" ^(python mt5_ai_service.py --mode socket^)
-    echo if "%%MODE%%"=="3" ^(python mt5_ai_service_optimized.py --mode file^)
-    echo if "%%MODE%%"=="4" ^(python ai_service_integrated.py^)
-    echo if "%%MODE%%"=="5" ^(
-    echo     set /p ARGS="Enter startup args: "
-    echo     python mt5_ai_service.py %%ARGS%%
+    echo if exist "venv\Scripts\activate.bat" ^(
+    echo     call "venv\Scripts\activate.bat"
     echo ^)
-    echo if not defined MODE ^(python mt5_ai_service.py --mode file^)
+    echo echo.
+    echo echo ================================================
+    echo echo    MT5 AI Trading System - canonical file mode
+    echo echo ================================================
+    echo echo.
+    echo python mt5_ai_service.py --mode file --log-file logs/ai_service.log
     echo.
     echo pause
 ) > "%LAUNCHER%"
@@ -265,7 +272,7 @@ echo       "%VENV_DIR%\Scripts\activate.bat"
 echo       python mt5_ai_service.py --mode file
 echo.
 echo    IMPORTANT:
-echo    - Edit .env and set your DEEPSEEK_API_KEY first!
+echo    - Set DEEPSEEK_API_KEY in Windows user/system environment first.
 echo    - Ensure MT5 terminal is running with EA loaded
 echo    - Socket mode uses port 8080 when enabled
 echo.

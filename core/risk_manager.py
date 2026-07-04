@@ -7,6 +7,7 @@
 
 import math
 import time
+import datetime as dt
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
@@ -22,6 +23,39 @@ from core.datastore import get_datastore
 from core.market_data_analyzer import get_market_data_analyzer
 from core.mql5_data import get_mql5_data_manager
 from core.margin_manager import get_margin_manager
+from core.pip_utils import (
+    is_gold, is_jpy_pair, pips_to_points, 
+    PIPS_PER_POINT_GOLD, POINTS_PER_PIP_GOLD,
+    calculate_risk_per_lot, validate_sl_tp
+)
+
+# ── 风险阈值常量（集中管理，便于调优） ──
+# 风险评分阈值
+RISK_THRESHOLD_VERY_HIGH = 0.7
+RISK_THRESHOLD_HIGH = 0.5
+RISK_THRESHOLD_MEDIUM = 0.3
+RISK_THRESHOLD_LOW = 0.1
+
+# 波动率阈值
+VOLATILITY_VERY_HIGH = 0.25
+VOLATILITY_HIGH = 0.15
+VOLATILITY_LOW = 0.05
+
+# 仓位分级阈值（手数）
+POSITION_MICRO = 0.02
+POSITION_SMALL = 0.05
+POSITION_MEDIUM = 0.1
+
+# 历史记录容量限制
+MAX_TRADE_HISTORY = 1000
+MAX_DAILY_PNL = 250
+
+# 保证金水平阈值
+MARGIN_CRITICAL = 20.0
+MARGIN_DANGER = 50.0
+MARGIN_WARNING = 100.0
+MARGIN_NORMAL = 200.0
+MARGIN_COMFORTABLE = 500.0
 
 
 class RiskLevel(Enum):
@@ -135,10 +169,26 @@ class RiskManager:
         self.running = False
         self.monitor_thread: Optional[threading.Thread] = None
         
+        # 危机模式标志（由MarginCrisisHandler设置）
+        self.is_crisis_mode = False
+        self.crisis_risk_params: Dict[str, Any] = {}
+        
         # 市场波动率缓存
         self.volatility_cache: Dict[str, float] = {}
         
         logger.info("[RM]  自适应风险管理器初始化完成")
+    
+    def _prune_trade_history(self):
+        """裁剪交易历史，防止内存无限增长"""
+        if len(self.trade_history) > MAX_TRADE_HISTORY:
+            self.trade_history = self.trade_history[-MAX_TRADE_HISTORY:]
+        if len(self.daily_pnl) > MAX_DAILY_PNL:
+            self.daily_pnl = self.daily_pnl[-MAX_DAILY_PNL:]
+    
+    def record_trade(self, trade: Dict[str, Any]):
+        """记录交易并自动裁剪历史"""
+        self.trade_history.append(trade)
+        self._prune_trade_history()
     
     def start(self):
         """启动风险监控"""
@@ -309,24 +359,24 @@ class RiskManager:
             )
             
             # 根据保证金水平进行多级预警
-            if margin_level < 20.0:
+            if margin_level < MARGIN_CRITICAL:
                 logger.warning(f"[紧急] 保证金水平极低: {margin_level:.1f}%，立即采取措施！")
                 # 自动降低风险等级
                 self.risk_params.risk_level = RiskLevel.VERY_HIGH
                 self._update_risk_parameters(self.risk_params.risk_level)
                 
-            elif margin_level < 50.0:
+            elif margin_level < MARGIN_DANGER:
                 logger.warning(f"[危险] 保证金水平危险: {margin_level:.1f}%，建议减仓")
                 self.risk_params.risk_level = RiskLevel.HIGH
                 self._update_risk_parameters(self.risk_params.risk_level)
                 
-            elif margin_level < 100.0:
+            elif margin_level < MARGIN_WARNING:
                 logger.warning(f"[警告] 保证金水平警告: {margin_level:.1f}%，需关注")
                 if self.risk_params.risk_level.value < RiskLevel.HIGH.value:
                     self.risk_params.risk_level = RiskLevel.MEDIUM
                     self._update_risk_parameters(self.risk_params.risk_level)
                     
-            elif margin_level < 200.0:
+            elif margin_level < MARGIN_NORMAL:
                 logger.info(f"[DATA] 保证金水平正常: {margin_level:.1f}%")
             
             # 检查持仓集中度风险
@@ -374,7 +424,7 @@ class RiskManager:
                     self.volatility_cache[symbol] = volatility
                     
                     # 高波动率警告
-                    if volatility > 0.15:  # 年化波动率超过15%
+                    if volatility > VOLATILITY_HIGH:  # 年化波动率超过15%
                         logger.warning(f"[WARN]  {symbol}波动率过高: {volatility:.2%}")
                         
         except Exception as e:
@@ -388,11 +438,11 @@ class RiskManager:
         risk_score = 0.0
         
         # 波动率贡献
-        if self.risk_metrics.volatility > 0.25:
+        if self.risk_metrics.volatility > VOLATILITY_VERY_HIGH:
             risk_score += 0.4
-        elif self.risk_metrics.volatility > 0.15:
+        elif self.risk_metrics.volatility > VOLATILITY_HIGH:
             risk_score += 0.2
-        elif self.risk_metrics.volatility < 0.05:
+        elif self.risk_metrics.volatility < VOLATILITY_LOW:
             risk_score -= 0.1
         
         # 回撤贡献
@@ -422,14 +472,14 @@ class RiskManager:
         elif self.risk_metrics.profit_factor > 2.0:
             risk_score -= 0.1
         
-        # 确定风险等级
-        if risk_score >= 0.6:
+        # 确定风险等级（使用集中管理的阈值常量）
+        if risk_score >= RISK_THRESHOLD_VERY_HIGH:
             new_level = RiskLevel.VERY_HIGH
-        elif risk_score >= 0.3:
+        elif risk_score >= RISK_THRESHOLD_HIGH:
             new_level = RiskLevel.HIGH
-        elif risk_score >= 0.0:
+        elif risk_score >= RISK_THRESHOLD_MEDIUM:
             new_level = RiskLevel.MEDIUM
-        elif risk_score >= -0.2:
+        elif risk_score >= RISK_THRESHOLD_LOW:
             new_level = RiskLevel.LOW
         else:
             new_level = RiskLevel.VERY_LOW
@@ -508,6 +558,29 @@ class RiskManager:
                 if existing_positions_for_symbol > 0:
                     warning_messages.append(f"当前已有{existing_positions_for_symbol}个{symbol}持仓")
             
+            # 检查点差（取自 src/strategy 的高精度闸门逻辑）
+            tick_data = realtime_data.get("tick_summary", {})
+            if tick_data:
+                bid = tick_data.get("bid", 0)
+                ask = tick_data.get("ask", 0)
+                point = tick_data.get("point", 0.01)
+                if bid > 0 and ask > 0 and point > 0:
+                    spread_points = (ask - bid) / point
+                    max_spread = 350.0  # 默认最大点差
+                    if spread_points > max_spread:
+                        warning_messages.append(
+                            f"点差过大: {spread_points:.1f} > {max_spread:.1f}点"
+                        )
+                        logger.warning(f"[WARN]  {symbol}点差过大: {spread_points:.1f}点")
+            
+            # 检查broker止损水平（MT5硬限制，取自 src/strategy）
+            symbol_info = tick_data.get("symbol_info", {})
+            trade_stops_level = symbol_info.get("trade_stops_level", 0)
+            if trade_stops_level > 0 and self.risk_params.stop_loss_pips < trade_stops_level:
+                logger.warning(
+                    f"[WARN]  止损距离 {self.risk_params.stop_loss_pips} 小于broker限制 {trade_stops_level}"
+                )
+            
             # 检查保证金水平，使用智能保证金管理器优化
             margin_advice = self.margin_manager.get_margin_advice_for_trade(
                 symbol=symbol,
@@ -520,7 +593,17 @@ class RiskManager:
             warning_level = margin_advice["warning_level"]
             
             # 根据保证金建议调整仓位乘数
-            if warning_level == "critical" or not margin_sufficient:
+            # 防御性检查：File模式EA无法推送实时账户数据，margin_free=0但margin_level虚高
+            # 此时应跳过保证金限制，避免误杀
+            is_data_incomplete = (
+                not margin_sufficient 
+                and current_margin_level > 200.0 
+                and margin_advice.get("margin_available", 0) <= 0
+            )
+            if is_data_incomplete:
+                logger.debug(f"[DATA] 保证金数据不完整(File模式/EA未推送)，跳过保证金限制")
+                margin_multiplier = 1.0
+            elif warning_level == "critical" or not margin_sufficient:
                 warning_messages.append(f"[紧急] 保证金不足，无法开仓: 水平{current_margin_level:.1f}%")
                 margin_multiplier = 0.0  # 完全禁止开仓
             elif warning_level == "high":
@@ -533,7 +616,7 @@ class RiskManager:
                 margin_multiplier = 1.0
             else:
                 # 保守默认
-                if current_margin_level < 100.0:
+                if current_margin_level < MARGIN_WARNING:
                     warning_messages.append(f"保证金水平过低: {current_margin_level:.1f}%")
                     margin_multiplier = max(0.1, current_margin_level / 200.0)
                 else:
@@ -563,16 +646,16 @@ class RiskManager:
                 warning_messages.append(f"因已有持仓，仓位规模减少")
             
             # 计算止损止盈价格
-            point_value = self._get_point_value(symbol, current_price)
             stop_loss_price, take_profit_price = self._calculate_stop_take_prices(
                 symbol, action, current_price, adjusted_stop_loss, adjusted_take_profit
             )
             
             # 计算风险回报比（单位统一为美元）
-            # 每手每点价值 = point_value（MT5 Point），止损点数 = adjusted_stop_loss（MT5 Points）
-            risk_per_lot = adjusted_stop_loss * point_value  # 每手风险（美元）
+            # adjusted_stop_loss 单位 = pip, pip_value = $/pip/标准手
+            pip_value = self._get_pip_value(symbol, current_price)
+            risk_per_lot = adjusted_stop_loss * pip_value  # 每手风险（美元）
             risk_amount = position_size * risk_per_lot  # 总风险金额（美元）
-            reward_amount = position_size * adjusted_take_profit * point_value  # 预期盈利（美元）
+            reward_amount = position_size * adjusted_take_profit * pip_value  # 预期盈利（美元）
             
             risk_reward_ratio = reward_amount / risk_amount if risk_amount > 0 else 0
             
@@ -596,10 +679,9 @@ class RiskManager:
             if risk_reward_ratio < 1.0:
                 warning_messages.append("[WARN]  风险回报比低于1:1，不推荐")
             
-            # 仓位验证（简化版：仅检查是否超过计算值的50%）
-            # 注意：max_lots_by_margin 在 _calculate_position_size_with_real_data 中定义
-            # 这里简化为检查当前仓位是否明显低于理论值
-            if position_size > 0.01 and position_size < 0.1 and calculated_lots > 0.2:
+            # 仓位验证：如果仓位远小于理论计算值，可能是保证金限制导致
+            max_lots_by_margin_val = margin_advice.get("recommended_max_position", position_size)
+            if position_size > 0.01 and position_size < 0.1 and max_lots_by_margin_val > 0.2:
                 warning_messages.append("[WARN]  理论仓位较大但实际受限，建议检查保证金")
             
             # 构建风险评估结果
@@ -670,12 +752,12 @@ class RiskManager:
             recommended_max_position = margin_advice["recommended_max_position"]
             margin_sufficient = margin_advice["margin_sufficient"]
             
-            # 计算每点价值（注意：stop_loss_pips 实际是 MT5 Points）
-            point_value = self._get_point_value(symbol, current_price)
+            # 计算每pip价值（统一单位：pip）
+            pip_value = self._get_pip_value(symbol, current_price)
             
             # 计算每手风险金额
-            # stop_loss_pips 是 MT5 Points，乘以每点价值得到美元风险
-            risk_per_lot = stop_loss_pips * point_value
+            # stop_loss_pips 单位 = pip, pip_value = $/pip/标准手
+            risk_per_lot = stop_loss_pips * pip_value
             
             if risk_per_lot <= 0:
                 return 0.01  # 最小仓位
@@ -698,23 +780,23 @@ class RiskManager:
             # 4. 波动率调整限制
             volatility = self.volatility_cache.get(symbol, 0.1)
             vol_multiplier = 1.0
-            if volatility > 0.25:
+            if volatility > VOLATILITY_VERY_HIGH:
                 vol_multiplier = 0.25
-            elif volatility > 0.15:
+            elif volatility > VOLATILITY_HIGH:
                 vol_multiplier = 0.5
-            elif volatility < 0.05:
+            elif volatility < VOLATILITY_LOW:
                 vol_multiplier = 1.5
             
             # 5. 保证金水平调整
             margin_level = margin_advice["margin_level"]
             margin_multiplier = 1.0
-            if margin_level < 50.0:
+            if margin_level < MARGIN_DANGER:
                 margin_multiplier = 0.1
-            elif margin_level < 100.0:
+            elif margin_level < MARGIN_WARNING:
                 margin_multiplier = 0.3
-            elif margin_level < 200.0:
+            elif margin_level < MARGIN_NORMAL:
                 margin_multiplier = 0.7
-            elif margin_level > 500.0:
+            elif margin_level > MARGIN_COMFORTABLE:
                 margin_multiplier = 1.2
             
             # 综合所有限制
@@ -740,9 +822,9 @@ class RiskManager:
             elif self.risk_params.position_sizing_method == PositionSizingMethod.VOLATILITY_ADJUSTED:
                 # 波动率调整：降低高波动品种的仓位
                 volatility = self.volatility_cache.get(symbol, 0.1)
-                if volatility > 0.15:
+                if volatility > VOLATILITY_HIGH:
                     position_size *= 0.5
-                elif volatility > 0.25:
+                elif volatility > VOLATILITY_VERY_HIGH:
                     position_size *= 0.25
             
             return round(position_size, 2)  # 保留两位小数
@@ -759,28 +841,27 @@ class RiskManager:
             symbol, current_price, stop_loss_pips, confidence_multiplier, self.equity
         )
     
-    def _get_point_value(self, symbol: str, price: float) -> float:
+    def _get_pip_value(self, symbol: str, price: float) -> float:
         """
-        获取每 MT5 Point 价值（美元）
+        获取每 pip 的美元价值（标准手）
         
-        注意：本函数返回值单位是"每MT5 Point"，不是"每pip"
-        - 对于黄金：1 MT5 Point = 0.01 美元（标准手）
-        - 1 pip = 10 * MT5 Point = 0.10 美元
+        单位体系:
+        - 黄金/XAUUSD: 1 pip = 0.10 价格单位 = 10 MT5 Points, 1 pip ≈ $10.00 (标准手)
+        - 外汇: 1 pip = 0.0001 价格单位 = 10 MT5 Points, 1 pip ≈ $10.00 (标准手)
+        - 日元对: 1 pip = 0.01 价格单位 = 100 MT5 Points, 1 pip ≈ $9.26 (标准手)
+        
+        本项目约定: stop_loss_pips/take_profit_pips 单位均为 pips
         """
         try:
             if "JPY" in symbol:
-                # 日元对：每点价值约9美元（标准手）
-                return 9.0
+                return 9.26  # 日元对：每pip约$9.26（标准手）
             elif "XAU" in symbol.upper() or "GOLD" in symbol.upper():
-                # 黄金：每 MT5 Point 价值约1美元（标准手）
-                # MT5 Point = 0.01，所以1点 = 0.01 * 100 = 1美元（1标准手=100盎司）
-                return 1.0
+                return 10.0  # 黄金：每pip约$10.00（标准手）
             else:
-                # 主要货币对：每点价值约10美元（标准手）
-                return 10.0
+                return 10.0  # 主要货币对：每pip约$10.00（标准手）
                 
         except Exception as e:
-            logger.error(f"[ERR] 计算每点价值失败: {e}")
+            logger.error(f"[ERR] 计算每pip价值失败: {e}")
             return 10.0
     
     def _calculate_stop_take_prices(self, symbol: str, action: str, current_price: float,
@@ -788,25 +869,26 @@ class RiskManager:
         """
         计算止损止盈价格
         
-        单位约定（与EA端保持一致）：
-        - stop_loss_pips/take_profit_pips 是以MT5 Point为单位的点数
-        - 对于黄金：1 pip = 10 Points，1 Point = 0.01
-        - pip_size = MT5的_Point值
+        单位转换: pips → 价格距离
+        - 黄金: 1 pip = 0.10 价格单位 (10 * _Point, _Point=0.01)
+        - 外汇: 1 pip = 0.0001 价格单位 (5位报价)
+        - 日元: 1 pip = 0.01 价格单位
         """
         try:
-            # MT5的Point值（最小价格变动）
-            point_value = 0.0001  # 大多数货币对（5位报价）
-            if "JPY" in symbol:
-                point_value = 0.01  # 日元对（3位报价）
-            elif "XAU" in symbol.upper() or "GOLD" in symbol.upper():
-                point_value = 0.01  # 黄金：MT5 Point = 0.01
+            # pip → 价格距离的转换因子
+            if is_jpy_pair(symbol):
+                pip_size = 0.01
+            elif is_gold(symbol):
+                pip_size = 0.10  # 1 pip = 0.10 (10 * 0.01 MT5 Point)
+            else:
+                pip_size = 0.0001  # 1 pip = 0.0001 (5位报价)
             
             if action == "BUY":
-                stop_loss_price = current_price - (stop_loss_pips * point_value)
-                take_profit_price = current_price + (take_profit_pips * point_value)
+                stop_loss_price = current_price - (stop_loss_pips * pip_size)
+                take_profit_price = current_price + (take_profit_pips * pip_size)
             else:  # SELL
-                stop_loss_price = current_price + (stop_loss_pips * point_value)
-                take_profit_price = current_price - (take_profit_pips * point_value)
+                stop_loss_price = current_price + (stop_loss_pips * pip_size)
+                take_profit_price = current_price - (take_profit_pips * pip_size)
             
             # 确保止损止盈价格合理
             if action == "BUY":
@@ -846,11 +928,11 @@ class RiskManager:
             
             # 仓位大小贡献（0-0.15） - 降低权重，避免仓位变化时评分跳变
             # 0.01-0.05手视为低仓位(0-0.05)，0.05-0.1手中等(0.05-0.1)，0.1+高仓位
-            if position_size <= 0.02:
+            if position_size <= POSITION_MICRO:
                 position_score = 0.0  # 极小仓位无额外风险
-            elif position_size <= 0.05:
+            elif position_size <= POSITION_SMALL:
                 position_score = 0.05
-            elif position_size <= 0.1:
+            elif position_size <= POSITION_MEDIUM:
                 position_score = 0.1
             else:
                 position_score = 0.15
@@ -877,8 +959,7 @@ class RiskManager:
                             risk_score += trend_persistence_score
             
             # 市场时段风险（0-0.05） - 低流动性时段风险略高
-            import datetime
-            current_hour = datetime.datetime.now().hour
+            current_hour = dt.datetime.now().hour
             if current_hour < 7 or current_hour > 22:  # 非活跃时段
                 risk_score += 0.03
             elif 7 <= current_hour <= 8 or 20 <= current_hour <= 22:  # 开盘前后
@@ -893,13 +974,13 @@ class RiskManager:
     
     def _determine_trade_risk_level(self, risk_score: float) -> RiskLevel:
         """根据风险评分确定交易风险等级"""
-        if risk_score >= 0.7:
+        if risk_score >= RISK_THRESHOLD_VERY_HIGH:
             return RiskLevel.VERY_HIGH
-        elif risk_score >= 0.5:
+        elif risk_score >= RISK_THRESHOLD_HIGH:
             return RiskLevel.HIGH
-        elif risk_score >= 0.3:
+        elif risk_score >= RISK_THRESHOLD_MEDIUM:
             return RiskLevel.MEDIUM
-        elif risk_score >= 0.1:
+        elif risk_score >= RISK_THRESHOLD_LOW:
             return RiskLevel.LOW
         else:
             return RiskLevel.VERY_LOW

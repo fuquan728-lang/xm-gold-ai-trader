@@ -26,6 +26,8 @@ from src.broker.execution_safety import (
     REASON_ORDER_CHECK_FAILED,
     evaluate_execution_safety,
     order_check_passed,
+    order_send_failure_decision,
+    order_send_passed,
 )
 from src.broker.mt5_client import MT5Client, MT5ClientError
 from src.broker.order_executor import TradingConfig
@@ -151,8 +153,11 @@ def execute_demo_micro_order(client: Any, config: TradingConfig, signal: TradeSi
     if not order_check_passed(check_result):
         return block_event(event, (REASON_ORDER_CHECK_FAILED,), (f"{REASON_ORDER_CHECK_FAILED}: order_check did not pass",))
 
-    send_result = client.order_send_checked(request, check_result)
+    send_result = client.order_send_checked(request, check_result, require_success=False)
     event["order_send_result"] = result_to_dict(send_result)
+    if not order_send_passed(send_result):
+        decision = order_send_failure_decision(send_result)
+        return block_event(event, decision.reason_codes, decision.reasons)
     event["orders_sent"] = 1
     event["final_decision"] = "SENT"
     return event

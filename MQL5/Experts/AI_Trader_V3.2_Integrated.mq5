@@ -19,27 +19,35 @@
 #include <ChartObjects\ChartObjectsLines.mqh>
 #include <ChartObjects\ChartObjectsShapes.mqh>
 
+input int  InpResponseTimeout = 45;           // AI response timeout seconds
+input bool InpAccountDisableSocketOn4014 = true; // Disable account socket after MT5 error 4014
+input bool InpBlockForeignSymbolPositions = true; // Block if same symbol has manual/other-EA positions
+
 // ==================== 输入参数 ====================
 input string InpDataPath        = "";       // 数据文件路径
 input int    InpRequestInterval = 300;      // 请求间隔（秒）- 5分钟
 input double InpLotSize         = 0.01;     // 交易手数
 input double InpMinConfidence   = 0.65;     // 最小置信度才交易
 input bool   InpShowPanel       = true;     // 显示技术分析面板
-input int    InpStopLoss        = 30;       // 止损点数（0=关闭）
-input int    InpTakeProfit      = 60;       // 止盈点数（0=关闭）
+input int    InpStopLoss        = 30;       // 止损pips（0=关闭）
+input int    InpTakeProfit      = 60;       // 止盈pips（0=关闭）
 input bool   InpShowLines       = true;     // 显示支撑阻力线
-input int    InpTrailingStop    = 30;       // 追踪止损点数（0=关闭）
+input int    InpTrailingStop    = 30;       // 追踪止损pips（0=关闭）
 
 // ==================== 实时账户数据推送配置 ====================
 input bool   InpPushAccountData = true;     // 启用账户数据推送
 input int    InpAccountDataInterval = 60;   // 账户数据推送间隔（秒）
 input string InpAccountDataHost = "127.0.0.1"; // 账户数据推送服务器IP
 input int    InpAccountDataPort = 8080;     // 账户数据推送服务器端口
+input int    InpAccountReconnectInterval = 10; // 账户数据Socket重连间隔（秒）
+input bool   InpAccountDataFileFallback = true; // Socket失败时写入mt5_account.json
 
 // ==================== 安全参数（新增） ====================
 input bool   InpReversePosition = true;     // 反向信号时平仓反转
 input double InpMaxDailyLoss    = 0.0;      // 每日最大亏损（0=禁用）
 input bool   InpEnableRiskCheck = true;     // 启用风险检查
+input bool   InpAllowLiveTrading = false;   // 硬安全闸：默认禁止真实账户交易
+input bool   InpRequireDemoAccount = true;  // 硬安全闸：默认必须为demo账户
 
 // ==================== 性能优化参数 ====================
 input int    InpPanelUpdateInt  = 1;        // 面板更新间隔（秒）
@@ -73,6 +81,49 @@ double m_resistance_price = 0;
 // 动态止损止盈（从AI响应中解析，优先于输入参数）
 int g_dynamic_sl_pips = 0;
 int g_dynamic_tp_pips = 0;
+
+int PipToPointMultiplier()
+{
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   if(StringFind(_Symbol, "GOLD") >= 0 || StringFind(_Symbol, "XAU") >= 0)
+      return 10;
+   if(digits == 3 || digits == 5)
+      return 10;
+   return 1;
+}
+
+double PipsToPrice(int pips)
+{
+   return (double)pips * PipToPointMultiplier() * m_symbol.Point();
+}
+
+string ExtractJsonString(string json, string key)
+{
+   string pattern = "\"" + key + "\":\"";
+   int start_pos = StringFind(json, pattern);
+   if(start_pos == -1)
+      return "";
+   start_pos += StringLen(pattern);
+   int end_pos = StringFind(json, "\"", start_pos);
+   if(end_pos == -1)
+      return "";
+   return StringSubstr(json, start_pos, end_pos - start_pos);
+}
+
+string BuildRequestId()
+{
+   return _Symbol + "_" + IntegerToString((int)_Period) + "_" +
+          IntegerToString((long)TimeCurrent()) + "_" +
+          IntegerToString((int)(GetTickCount() % 1000000));
+}
+
+string FormatIsoTime(datetime value)
+{
+   MqlDateTime dt;
+   TimeToStruct(value, dt);
+   return StringFormat("%04d-%02d-%02dT%02d:%02d:%02d",
+                       dt.year, dt.mon, dt.day, dt.hour, dt.min, dt.sec);
+}
 
 // 更新时间跟踪
 datetime m_last_panel_update = 0;
@@ -123,6 +174,11 @@ datetime m_last_reset_day = 0;
 datetime m_last_account_data_push = 0;
 bool m_account_data_enabled = false;
 int m_account_data_socket = -1;
+datetime m_next_account_data_retry = 0;
+int m_account_data_failures = 0;
+bool m_account_data_socket_disabled = false;
+string m_current_request_id = "";
+datetime m_last_ready_warning = 0;
 
 // ==================== 常量定义 ====================
 const int PANEL_WIDTH = 380;
@@ -150,12 +206,17 @@ bool ValidateInputParameters() {
    }
    
    if(InpStopLoss < 0) {
-      Print("错误: 止损点数不能为负");
+      Print("错误: 止损pips不能为负");
       valid = false;
    }
    
    if(InpTakeProfit < 0) {
-      Print("错误: 止盈点数不能为负");
+      Print("错误: 止盈pips不能为负");
+      valid = false;
+   }
+
+   if(InpMaxDailyLoss < 0) {
+      Print("错误: 每日最大亏损不能为负");
       valid = false;
    }
    
@@ -220,30 +281,90 @@ bool IsDailyLossLimitReached() {
 }
 
 //+------------------------------------------------------------------+
+//| Hard safety gate before any order is sent                        |
+//+------------------------------------------------------------------+
+bool IsTradingEnvironmentReady() {
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) {
+      Print("[SAFE] Terminal auto trading is disabled");
+      return false;
+   }
+
+   if(!MQLInfoInteger(MQL_TRADE_ALLOWED)) {
+      Print("[SAFE] EA trading permission is disabled");
+      return false;
+   }
+
+   if(!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED)) {
+      Print("[SAFE] Account trading is not allowed");
+      return false;
+   }
+
+   long account_trade_mode = AccountInfoInteger(ACCOUNT_TRADE_MODE);
+   bool is_demo = (account_trade_mode == ACCOUNT_TRADE_MODE_DEMO);
+   if(InpRequireDemoAccount && !is_demo) {
+      Print("[SAFE] Demo account is required; account_trade_mode=", account_trade_mode);
+      return false;
+   }
+
+   if(!InpAllowLiveTrading && !is_demo) {
+      Print("[SAFE] Live trading is blocked. Set InpAllowLiveTrading=true only after explicit approval.");
+      return false;
+   }
+
+   long symbol_trade_mode = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
+   if(symbol_trade_mode == SYMBOL_TRADE_MODE_DISABLED) {
+      Print("[SAFE] Symbol trading is disabled: ", _Symbol);
+      return false;
+   }
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
 //| 【实时账户数据推送】初始化账户数据推送连接                        |
 //+------------------------------------------------------------------+
 bool InitAccountDataConnection() {
+   if(m_account_data_socket_disabled)
+      return false;
+
    if(m_account_data_socket != -1) {
       SocketClose(m_account_data_socket);
       m_account_data_socket = -1;
    }
    
    // 创建Socket
+   ResetLastError();
    m_account_data_socket = SocketCreate();
    if(m_account_data_socket == INVALID_HANDLE) {
-      Print("账户数据推送Socket创建失败");
+      int create_error = GetLastError();
+      Print("[ACCOUNT_PUSH] SocketCreate failed, error=", create_error);
       return false;
    }
    
    // 连接服务器
+   ResetLastError();
    if(!SocketConnect(m_account_data_socket, InpAccountDataHost, InpAccountDataPort, 5000)) {
-      Print("账户数据推送连接失败: ", InpAccountDataHost, ":", InpAccountDataPort);
+      int connect_error = GetLastError();
+      m_account_data_failures++;
+      int retry_seconds = InpAccountReconnectInterval;
+      if(retry_seconds < 1)
+         retry_seconds = 1;
+      m_next_account_data_retry = TimeCurrent() + retry_seconds;
+      Print("[ACCOUNT_PUSH] SocketConnect failed: ", InpAccountDataHost, ":", InpAccountDataPort,
+            " error=", connect_error, " failures=", m_account_data_failures,
+            " next_retry=", retry_seconds, "s");
+      if(InpAccountDisableSocketOn4014 && connect_error == 4014) {
+         m_account_data_socket_disabled = true;
+         Print("[ACCOUNT_PUSH] MT5 error 4014 detected; account Socket push disabled for this run, using file fallback");
+      }
       SocketClose(m_account_data_socket);
       m_account_data_socket = -1;
       return false;
    }
    
-   Print("账户数据推送连接成功: ", InpAccountDataHost, ":", InpAccountDataPort);
+   m_account_data_failures = 0;
+   m_next_account_data_retry = 0;
+   Print("[ACCOUNT_PUSH] Socket connected: ", InpAccountDataHost, ":", InpAccountDataPort);
    return true;
 }
 
@@ -309,34 +430,87 @@ string BuildAccountDataJson() {
 }
 
 //+------------------------------------------------------------------+
+//| Write account data to file fallback                              |
+//+------------------------------------------------------------------+
+bool WriteAccountDataFile(string json_data) {
+   string filename = "mt5_account.json";
+   if(InpDataPath != "")
+      filename = InpDataPath + "\\" + filename;
+
+   ResetLastError();
+   int handle = FileOpen(filename, FILE_WRITE | FILE_TXT | FILE_ANSI);
+   if(handle == INVALID_HANDLE) {
+      Print("[ACCOUNT_PUSH] File fallback open failed: ", filename, " error=", GetLastError());
+      return false;
+   }
+
+   FileWriteString(handle, json_data);
+   FileClose(handle);
+   Print("[ACCOUNT_PUSH] File fallback updated: ", filename);
+   return true;
+}
+
+//+------------------------------------------------------------------+
 //| 【实时账户数据推送】推送账户数据到服务器                          |
 //+------------------------------------------------------------------+
 void PushAccountDataToServer() {
    datetime now = TimeCurrent();
    if(now - m_last_account_data_push < InpAccountDataInterval)
       return;
-      
-   m_last_account_data_push = now;
-   
+
+   string json_data = BuildAccountDataJson();
+
+   if(m_account_data_socket_disabled) {
+      if(InpAccountDataFileFallback && WriteAccountDataFile(json_data))
+         m_last_account_data_push = now;
+      return;
+   }
+    
    // 检查连接状态
    if(m_account_data_socket == -1 || !SocketIsConnected(m_account_data_socket)) {
-      if(!InitAccountDataConnection())
+      if(m_next_account_data_retry > 0 && now < m_next_account_data_retry) {
+         if(InpAccountDataFileFallback && WriteAccountDataFile(json_data))
+            m_last_account_data_push = now;
          return;
+      }
+
+      if(!InitAccountDataConnection()) {
+         if(InpAccountDataFileFallback && WriteAccountDataFile(json_data))
+            m_last_account_data_push = now;
+         return;
+      }
    }
    
-   string json_data = BuildAccountDataJson();
    string send_data = json_data + "\n";
    uchar data[];
    int len = StringToCharArray(send_data, data);
+   if(len > 0 && data[len - 1] == 0)
+      len--;
+   if(len <= 0) {
+      Print("[ACCOUNT_PUSH] Empty payload, skip send");
+      return;
+   }
    
+   ResetLastError();
    int sent = SocketSend(m_account_data_socket, data, (uint)len);
    if(sent <= 0) {
-      Print("账户数据推送失败");
+      int send_error = GetLastError();
+      m_account_data_failures++;
+      int retry_seconds = InpAccountReconnectInterval;
+      if(retry_seconds < 1)
+         retry_seconds = 1;
+      m_next_account_data_retry = now + retry_seconds;
+      Print("[ACCOUNT_PUSH] SocketSend failed, error=", send_error,
+            " failures=", m_account_data_failures, " next_retry=", retry_seconds, "s");
       SocketClose(m_account_data_socket);
       m_account_data_socket = -1;
+      if(InpAccountDataFileFallback && WriteAccountDataFile(json_data))
+         m_last_account_data_push = now;
    }
    else {
-      Print("账户数据推送成功 (", sent, " bytes)");
+      m_last_account_data_push = now;
+      m_account_data_failures = 0;
+      Print("[ACCOUNT_PUSH] Socket push ok (", sent, " bytes)");
    }
 }
 
@@ -418,21 +592,25 @@ void UpdateIndicatorCache() {
    m_indicator_cache.last_update = now;
    m_perf_stats.indicator_calculations++;
    
-   double rsi_buffer[2];
+   double rsi_buffer[];
+   ArrayResize(rsi_buffer, 2);
    ArraySetAsSeries(rsi_buffer, true);
    if(CopyBuffer(m_rsi_handle, 0, 0, 2, rsi_buffer) > 0)
       m_indicator_cache.rsi = rsi_buffer[0];
    
-   double macd_main_buffer[2];
+   double macd_main_buffer[];
+   ArrayResize(macd_main_buffer, 2);
    ArraySetAsSeries(macd_main_buffer, true);
-   double macd_signal_buffer[2];
+   double macd_signal_buffer[];
+   ArrayResize(macd_signal_buffer, 2);
    ArraySetAsSeries(macd_signal_buffer, true);
    if(CopyBuffer(m_macd_handle, 0, 0, 2, macd_main_buffer) > 0 && CopyBuffer(m_macd_handle, 1, 0, 2, macd_signal_buffer) > 0) {
       m_indicator_cache.macd_main = macd_main_buffer[0];
       m_indicator_cache.macd_signal = macd_signal_buffer[0];
    }
    
-   double ema_buffer[2];
+   double ema_buffer[];
+   ArrayResize(ema_buffer, 2);
    ArraySetAsSeries(ema_buffer, true);
    if(CopyBuffer(m_ema_handle, 0, 0, 2, ema_buffer) > 0)
       m_indicator_cache.ema50 = ema_buffer[0];
@@ -443,8 +621,12 @@ void UpdateIndicatorCache() {
 //+------------------------------------------------------------------+
 string BuildMarketData() {
    UpdateIndicatorCache();
-   
+   m_current_request_id = BuildRequestId();
+    
    string data = "{";
+   data += "\"request_id\":\"" + m_current_request_id + "\",";
+   data += "\"request_created_at\":\"" + FormatIsoTime(TimeCurrent()) + "\",";
+   data += "\"ea_timeout_seconds\":" + IntegerToString(InpResponseTimeout) + ",";
    data += "\"symbol\":\"" + _Symbol + "\",";
    data += "\"timestamp\":\"" + TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS) + "\",";
    data += "\"bid\":" + DoubleToString(m_symbol.Bid(), (int)Digits()) + ",";
@@ -464,22 +646,53 @@ string BuildMarketData() {
    return data;
 }
 
+bool IsAIServiceReady()
+{
+   string filename = "service_ready.json";
+   if(InpDataPath != "")
+      filename = InpDataPath + "\\" + filename;
+
+   if(!FileIsExist(filename))
+      return false;
+
+   int handle = FileOpen(filename, FILE_READ | FILE_TXT | FILE_ANSI);
+   if(handle == INVALID_HANDLE)
+      return false;
+
+   string content = FileReadString(handle);
+   FileClose(handle);
+
+   return (StringFind(content, "\"ready\":true") >= 0);
+}
+
 //+------------------------------------------------------------------+
 //| 写入请求文件                                                     |
 //+------------------------------------------------------------------+
 bool WriteRequestFile(string data) {
    string filename = "ai_request.json";
+   string tmp_filename = "ai_request.tmp";
    if(InpDataPath != "")
+   {
       filename = InpDataPath + "\\" + filename;
+      tmp_filename = InpDataPath + "\\" + tmp_filename;
+   }
    
-   int handle = FileOpen(filename, FILE_WRITE | FILE_TXT | FILE_ANSI);
+   int handle = FileOpen(tmp_filename, FILE_WRITE | FILE_TXT | FILE_ANSI);
    if(handle == INVALID_HANDLE) {
-      Print("无法打开请求文件: ", filename);
+      Print("Unable to open request temp file: ", tmp_filename);
       return false;
    }
    
    FileWriteString(handle, data);
+   FileFlush(handle);
    FileClose(handle);
+   if(FileIsExist(filename))
+      FileDelete(filename);
+   if(!FileMove(tmp_filename, 0, filename, FILE_REWRITE)) {
+      Print("Atomic request file rename failed: ", tmp_filename, " -> ", filename,
+            " error=", GetLastError());
+      return false;
+   }
    return true;
 }
 
@@ -508,10 +721,11 @@ bool ReadResponseFile(string &response) {
 //+------------------------------------------------------------------+
 //| 解析AI响应                                                       |
 //+------------------------------------------------------------------+
-bool ParseAIResponse(string json, string &action, double &confidence, string &reason) {
+bool ParseAIResponse(string json, string &action, double &confidence, string &reason, string &response_request_id) {
    // 重置动态值
    g_dynamic_sl_pips = 0;
    g_dynamic_tp_pips = 0;
+   response_request_id = ExtractJsonString(json, "request_id");
    
    int start_pos = StringFind(json, "\"action\":\"");
    if(start_pos == -1) return false;
@@ -544,7 +758,7 @@ bool ParseAIResponse(string json, string &action, double &confidence, string &re
       if(sl_end > sl_pos) {
          g_dynamic_sl_pips = (int)StringToDouble(StringSubstr(json, sl_pos, sl_end - sl_pos));
          if(g_dynamic_sl_pips > 0)
-            Print("解析到动态止损: ", g_dynamic_sl_pips, "点");
+            Print("解析到动态止损: ", g_dynamic_sl_pips, " pips");
       }
    }
    
@@ -557,7 +771,7 @@ bool ParseAIResponse(string json, string &action, double &confidence, string &re
       if(tp_end > tp_pos) {
          g_dynamic_tp_pips = (int)StringToDouble(StringSubstr(json, tp_pos, tp_end - tp_pos));
          if(g_dynamic_tp_pips > 0)
-            Print("解析到动态止盈: ", g_dynamic_tp_pips, "点");
+            Print("解析到动态止盈: ", g_dynamic_tp_pips, " pips");
       }
    }
    
@@ -567,10 +781,25 @@ bool ParseAIResponse(string json, string &action, double &confidence, string &re
 //+------------------------------------------------------------------+
 //| 【安全修复】检查持仓状态                                         |
 //+------------------------------------------------------------------+
-bool HasExistingPosition() {
+bool GetExistingOwnPosition(int &position_type, ulong &ticket) {
    for(int i = PositionsTotal() - 1; i >= 0; i--) {
       if(m_position.SelectByIndex(i)) {
          if(m_position.Symbol() == _Symbol && m_position.Magic() == 987656) {
+            position_type = (int)m_position.PositionType();
+            ticket = m_position.Ticket();
+            return true;
+         }
+      }
+   }
+   position_type = -1;
+   ticket = 0;
+   return false;
+}
+
+bool HasForeignSymbolPosition() {
+   for(int i = PositionsTotal() - 1; i >= 0; i--) {
+      if(m_position.SelectByIndex(i)) {
+         if(m_position.Symbol() == _Symbol && m_position.Magic() != 987656) {
             return true;
          }
       }
@@ -582,7 +811,11 @@ bool HasExistingPosition() {
 //| 【安全修复】执行交易                                             |
 //+------------------------------------------------------------------+
 void ExecuteTrade(string action, double confidence) {
-   if(IsDailyLossLimitReached()) {
+   if(!IsTradingEnvironmentReady()) {
+      return;
+   }
+
+   if(InpEnableRiskCheck && IsDailyLossLimitReached()) {
       Print("已达到每日亏损限制，停止交易");
       return;
    }
@@ -592,13 +825,28 @@ void ExecuteTrade(string action, double confidence) {
       return;
    }
    
-   bool has_position = HasExistingPosition();
+   if(InpBlockForeignSymbolPositions && HasForeignSymbolPosition()) {
+      Print("[SAFE] Existing manual/other-EA position on ", _Symbol, "; skip AI trade");
+      return;
+   }
+
+   int existing_type = -1;
+   ulong existing_ticket = 0;
+   bool has_position = GetExistingOwnPosition(existing_type, existing_ticket);
    
    if(action == "BUY") {
       if(has_position) {
+         if(existing_type == POSITION_TYPE_BUY) {
+            Print("[SAFE] Existing same-direction BUY position; skip duplicate BUY");
+            return;
+         }
          if(InpReversePosition) {
             Print("发现现有持仓，执行反转交易");
-            m_trade.PositionClose(_Symbol);
+            if(!m_trade.PositionClose(existing_ticket)) {
+               Print("[SAFE] Failed to close existing position ticket=", existing_ticket,
+                     " retcode=", m_trade.ResultRetcode());
+               return;
+            }
             Sleep(50);
          } else {
             Print("已有持仓，跳过买入信号");
@@ -607,30 +855,31 @@ void ExecuteTrade(string action, double confidence) {
       }
       
       double sl_price = 0, tp_price = 0;
+      double entry_price = m_symbol.Ask();
       int use_sl = (g_dynamic_sl_pips > 0) ? g_dynamic_sl_pips : InpStopLoss;
       int use_tp = (g_dynamic_tp_pips > 0) ? g_dynamic_tp_pips : InpTakeProfit;
       
       if(use_sl > 0)
-         sl_price = m_symbol.Bid() - use_sl * m_symbol.Point();
+         sl_price = entry_price - PipsToPrice(use_sl);
       if(use_tp > 0)
-         tp_price = m_symbol.Bid() + use_tp * m_symbol.Point();
+         tp_price = entry_price + PipsToPrice(use_tp);
       
-      Print("BUY: SL=", use_sl, "点", (g_dynamic_sl_pips > 0 ? "(动态)" : "(固定)"),
-            " TP=", use_tp, "点", (g_dynamic_tp_pips > 0 ? "(动态)" : "(固定)"));
+      Print("BUY: SL=", use_sl, " pips", (g_dynamic_sl_pips > 0 ? "(动态)" : "(固定)"),
+            " TP=", use_tp, " pips", (g_dynamic_tp_pips > 0 ? "(动态)" : "(固定)"));
       
       // 保证金检查
       double margin_buy;
-      if(OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, InpLotSize, m_symbol.Ask(), margin_buy))
+      if(InpEnableRiskCheck && OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, InpLotSize, entry_price, margin_buy))
       {
-         if(AccountInfoDouble(ACCOUNT_FREEMARGIN) < margin_buy * 1.1)
+         if(AccountInfoDouble(ACCOUNT_MARGIN_FREE) < margin_buy * 1.1)
          {
             Print("BUY保证金不足: 需要=", DoubleToString(margin_buy, 2),
-                  " 可用=", DoubleToString(AccountInfoDouble(ACCOUNT_FREEMARGIN), 2));
+                  " 可用=", DoubleToString(AccountInfoDouble(ACCOUNT_MARGIN_FREE), 2));
             return;
          }
       }
       
-      if(m_trade.Buy(InpLotSize, _Symbol, m_symbol.Ask(), sl_price, tp_price)) {
+      if(m_trade.Buy(InpLotSize, _Symbol, entry_price, sl_price, tp_price)) {
          m_perf_stats.trade_executions++;
          Print("买入订单执行成功");
       } else {
@@ -639,9 +888,17 @@ void ExecuteTrade(string action, double confidence) {
       
    } else if(action == "SELL") {
       if(has_position) {
+         if(existing_type == POSITION_TYPE_SELL) {
+            Print("[SAFE] Existing same-direction SELL position; skip duplicate SELL");
+            return;
+         }
          if(InpReversePosition) {
             Print("发现现有持仓，执行反转交易");
-            m_trade.PositionClose(_Symbol);
+            if(!m_trade.PositionClose(existing_ticket)) {
+               Print("[SAFE] Failed to close existing position ticket=", existing_ticket,
+                     " retcode=", m_trade.ResultRetcode());
+               return;
+            }
             Sleep(50);
          } else {
             Print("已有持仓，跳过卖出信号");
@@ -650,30 +907,31 @@ void ExecuteTrade(string action, double confidence) {
       }
       
       double sl_price = 0, tp_price = 0;
+      double entry_price_s = m_symbol.Bid();
       int use_sl_s = (g_dynamic_sl_pips > 0) ? g_dynamic_sl_pips : InpStopLoss;
       int use_tp_s = (g_dynamic_tp_pips > 0) ? g_dynamic_tp_pips : InpTakeProfit;
       
       if(use_sl_s > 0)
-         sl_price = m_symbol.Ask() + use_sl_s * m_symbol.Point();
+         sl_price = entry_price_s + PipsToPrice(use_sl_s);
       if(use_tp_s > 0)
-         tp_price = m_symbol.Bid() - use_tp_s * m_symbol.Point();
+         tp_price = entry_price_s - PipsToPrice(use_tp_s);
       
-      Print("SELL: SL=", use_sl_s, "点", (g_dynamic_sl_pips > 0 ? "(动态)" : "(固定)"),
-            " TP=", use_tp_s, "点", (g_dynamic_tp_pips > 0 ? "(动态)" : "(固定)"));
+      Print("SELL: SL=", use_sl_s, " pips", (g_dynamic_sl_pips > 0 ? "(动态)" : "(固定)"),
+            " TP=", use_tp_s, " pips", (g_dynamic_tp_pips > 0 ? "(动态)" : "(固定)"));
       
       // 保证金检查
       double margin_sell;
-      if(OrderCalcMargin(ORDER_TYPE_SELL, _Symbol, InpLotSize, m_symbol.Bid(), margin_sell))
+      if(InpEnableRiskCheck && OrderCalcMargin(ORDER_TYPE_SELL, _Symbol, InpLotSize, entry_price_s, margin_sell))
       {
-         if(AccountInfoDouble(ACCOUNT_FREEMARGIN) < margin_sell * 1.1)
+         if(AccountInfoDouble(ACCOUNT_MARGIN_FREE) < margin_sell * 1.1)
          {
             Print("SELL保证金不足: 需要=", DoubleToString(margin_sell, 2),
-                  " 可用=", DoubleToString(AccountInfoDouble(ACCOUNT_FREEMARGIN), 2));
+                  " 可用=", DoubleToString(AccountInfoDouble(ACCOUNT_MARGIN_FREE), 2));
             return;
          }
       }
       
-      if(m_trade.Sell(InpLotSize, _Symbol, m_symbol.Bid(), sl_price, tp_price)) {
+      if(m_trade.Sell(InpLotSize, _Symbol, entry_price_s, sl_price, tp_price)) {
          m_perf_stats.trade_executions++;
          Print("卖出订单执行成功");
       } else {
@@ -696,15 +954,16 @@ void ManageTrailingStop() {
          if(m_position.Symbol() == _Symbol && m_position.Magic() == 987656) {
             double current_price = (m_position.PositionType() == POSITION_TYPE_BUY) ? m_symbol.Bid() : m_symbol.Ask();
             double new_sl = 0;
+            double current_sl = m_position.StopLoss();
             
             if(m_position.PositionType() == POSITION_TYPE_BUY) {
-               new_sl = current_price - InpTrailingStop * m_symbol.Point();
-               if(new_sl > m_position.StopLoss() && new_sl > m_position.PriceOpen()) {
+               new_sl = current_price - PipsToPrice(InpTrailingStop);
+               if((current_sl <= 0 || new_sl > current_sl) && new_sl > m_position.PriceOpen()) {
                   m_trade.PositionModify(m_position.Ticket(), new_sl, m_position.TakeProfit());
                }
             } else if(m_position.PositionType() == POSITION_TYPE_SELL) {
-               new_sl = current_price + InpTrailingStop * m_symbol.Point();
-               if(new_sl < m_position.StopLoss() && new_sl < m_position.PriceOpen()) {
+               new_sl = current_price + PipsToPrice(InpTrailingStop);
+               if((current_sl <= 0 || new_sl < current_sl) && new_sl < m_position.PriceOpen()) {
                   m_trade.PositionModify(m_position.Ticket(), new_sl, m_position.TakeProfit());
                }
             }
@@ -737,7 +996,7 @@ void UpdateSupportResistanceLines() {
          m_support_line.Style(STYLE_DASH);
          m_support_line.Width(1);
       } else {
-         m_support_line.Price(m_support_price);
+         ObjectSetDouble(0, panel_name + "_support_line", OBJPROP_PRICE, m_support_price);
       }
       
       if(ObjectFind(0, panel_name + "_resistance_line") < 0) {
@@ -746,7 +1005,7 @@ void UpdateSupportResistanceLines() {
          m_resistance_line.Style(STYLE_DASH);
          m_resistance_line.Width(1);
       } else {
-         m_resistance_line.Price(m_resistance_price);
+         ObjectSetDouble(0, panel_name + "_resistance_line", OBJPROP_PRICE, m_resistance_price);
       }
    }
 }
@@ -902,9 +1161,8 @@ int OnInit() {
    // 初始化账户数据推送
    if(InpPushAccountData) {
       m_account_data_enabled = true;
-      if(!InitAccountDataConnection()) {
-         Print("账户数据推送连接初始化失败");
-      }
+      m_next_account_data_retry = TimeCurrent();
+      Print("[ACCOUNT_PUSH] enabled; socket will connect lazily");
    }
    
    UpdateSupportResistanceLines();
@@ -914,20 +1172,25 @@ int OnInit() {
    Print("版本: 3.20");
    Print("核心特性: AI智能交易 + 实时账户数据推送");
    Print("安全特性: 持仓检查/反转、止损验证、每日亏损限制");
+   Print("[PROTOCOL] v0.25.7 request_id=required stale_response_guard=enabled ready_gate=enabled atomic_request_write=enabled");
    if(InpTrailingStop > 0)
-      Print("追踪止损: ", IntegerToString(InpTrailingStop), "点");
+      Print("追踪止损: ", IntegerToString(InpTrailingStop), " pips");
    if(InpStopLoss > 0)
-      Print("止损: ", IntegerToString(InpStopLoss), "点");
+      Print("止损: ", IntegerToString(InpStopLoss), " pips");
    if(InpTakeProfit > 0)
-      Print("止盈: ", IntegerToString(InpTakeProfit), "点");
+      Print("止盈: ", IntegerToString(InpTakeProfit), " pips");
    if(InpMaxDailyLoss > 0)
       Print("每日亏损限制: ", DoubleToString(InpMaxDailyLoss, 2));
+   Print("硬安全闸: AllowLiveTrading=", InpAllowLiveTrading ? "true" : "false",
+         " RequireDemoAccount=", InpRequireDemoAccount ? "true" : "false");
    Print("面板更新间隔: ", InpPanelUpdateInt, "秒");
    Print("指标缓存周期: ", InpIndicatorCache, "根K线");
    Print("性能监控: ", InpEnablePerfStats ? "开启" : "关闭");
    Print("账户数据推送: ", InpPushAccountData ? "启用" : "禁用");
    Print("账户数据推送间隔: ", InpAccountDataInterval, "秒");
    Print("账户数据服务器: ", InpAccountDataHost, ":", InpAccountDataPort);
+   Print("账户数据重连间隔: ", InpAccountReconnectInterval, "秒");
+   Print("账户数据文件降级: ", InpAccountDataFileFallback ? "启用" : "禁用");
    Print("=========================================");
    
    return INIT_SUCCEEDED;
@@ -996,14 +1259,25 @@ void OnTick() {
          if(now - m_last_request_time >= InpRequestInterval) {
             if(!m_symbol.RefreshRates())
                break;
+
+            if(!IsAIServiceReady()) {
+               if(now - m_last_ready_warning >= 30) {
+                  Print("[READY] AI service not ready; request skipped");
+                  m_last_ready_warning = now;
+               }
+               break;
+            }
             
             m_last_request_time = now;
             
-            string filename = "ai_response.json";
-            if(FileIsExist(filename))
-               FileDelete(filename);
+            string response_filename = "ai_response.json";
+            if(InpDataPath != "")
+               response_filename = InpDataPath + "\\" + response_filename;
+            if(FileIsExist(response_filename))
+               FileDelete(response_filename);
             
             string market_data = BuildMarketData();
+            Print("[REQUEST] writing ai_request.json request_id=", m_current_request_id);
             
             Print("写入请求文件...");
             if(WriteRequestFile(market_data)) {
@@ -1018,8 +1292,11 @@ void OnTick() {
       case STATE_WAITING_RESPONSE:
          {
          m_request_state = STATE_WAITING_RESPONSE;
-         
+          
          string response;
+         int response_timeout = InpResponseTimeout;
+         if(response_timeout < 1)
+            response_timeout = 1;
          if(ReadResponseFile(response)) {
             m_request_state = STATE_RESPONSE_RECEIVED;
             
@@ -1029,9 +1306,21 @@ void OnTick() {
                string action;
                double confidence;
                string reason;
+               string response_request_id;
                
-               if(ParseAIResponse(response, action, confidence, reason)) {
-                  m_last_action = action;
+               if(ParseAIResponse(response, action, confidence, reason, response_request_id)) {
+                  Print("[RESPONSE] response_request_id=", response_request_id,
+                        " current_request_id=", m_current_request_id);
+                  if(response_request_id != m_current_request_id) {
+                     Print("[STALE_RESPONSE_IGNORED] response_request_id=", response_request_id,
+                           " current_request_id=", m_current_request_id);
+                     Print("[STALE_RESPONSE_WAIT_CONTINUE] current_request_id=", m_current_request_id);
+                     m_request_state = STATE_WAITING_RESPONSE;
+                     break;
+                  }
+                   Print("[REQUEST_ID_MATCHED] response_request_id=", response_request_id,
+                         " current_request_id=", m_current_request_id);
+                   m_last_action = action;
                   m_last_confidence = confidence;
                   m_last_reason = reason;
                   
@@ -1044,8 +1333,8 @@ void OnTick() {
                Print("未收到AI响应内容");
             }
             m_request_state = STATE_IDLE;
-         } else if(now - m_request_start_time > 10) {
-            Print("等待响应超时，重置状态");
+         } else if(now - m_request_start_time > response_timeout) {
+            Print("等待响应超时(", response_timeout, "秒)，重置状态");
             m_request_state = STATE_IDLE;
          }
          break;

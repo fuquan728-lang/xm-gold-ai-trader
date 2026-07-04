@@ -140,12 +140,13 @@ class MQL5DataManager:
             self.account_info.margin = data.get("margin", 0.0)
             self.account_info.margin_free = data.get("margin_free", 0.0)
             self.account_info.margin_level = data.get("margin_level", 0.0)
+            # margin=0 且 margin_level=0 表示无持仓 → 保证金水平为无限大
             if (
                 self.account_info.margin <= 0
                 and (self.account_info.margin_free > 0 or self.account_info.equity > 0)
                 and self.account_info.margin_level <= 0
             ):
-                self.account_info.margin_level = 1000.0
+                self.account_info.margin_level = float('inf')
             self.account_info.profit = data.get("profit", 0.0)
             self.account_info.currency = data.get("currency", "USD")
             self.account_info.leverage = data.get("leverage", 100)

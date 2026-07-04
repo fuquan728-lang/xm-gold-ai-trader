@@ -26,7 +26,7 @@ copy .env.example .env
 # 编辑.env文件，设置您的DeepSeek API密钥
 # 使用文本编辑器打开.env，修改以下内容：
 # USE_DEEPSEEK=true
-# DEEPSEEK_API_KEY=sk-您的真实API密钥
+# DEEPSEEK_API_KEY=<set-in-system-environment>
 ```
 
 ### 步骤3：启动AI服务
@@ -45,7 +45,7 @@ python mt5_ai_service.py --log-file service.log --log-level DEBUG
 ```
 
 ### 步骤4：安装并配置MT5 EA
-1. 将 `MQL5/Experts/AI_Trader_Integrated_Socket.mq5` 复制到MT5的 `MQL5/Experts/` 目录
+1. 将 `MQL5/Experts/AI_Trader_V3.2_Integrated.mq5` 复制到MT5的 `MQL5/Experts/` 目录
 2. 在MetaEditor中打开并编译（F7）
 3. 在MT5图表上添加EA
 4. 配置EA参数：
@@ -68,7 +68,7 @@ python mt5_ai_service.py --log-file service.log --log-level DEBUG
 ```env
 # DeepSeek AI配置
 USE_DEEPSEEK=true
-DEEPSEEK_API_KEY=sk-您的密钥
+DEEPSEEK_API_KEY=<set-in-system-environment>
 DEEPSEEK_API_URL=https://api.deepseek.com/v1/chat/completions
 DEEPSEEK_MODEL=deepseek-chat
 

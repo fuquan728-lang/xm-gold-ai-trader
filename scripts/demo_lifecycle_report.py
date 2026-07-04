@@ -23,12 +23,11 @@ from scripts.reconcile_demo_journal import (
     load_journal_entries,
     reconcile_entries,
 )
-from src.broker.execution_safety import position_matches
+from src.broker.execution_safety import ORDER_SEND_SUCCESS_RETCODES, position_matches
 from src.broker.mt5_client import MT5Client, MT5ClientError
 from src.logging_config import configure_logging
 
 
-ORDER_SEND_SUCCESS_RETCODES = {0, 10008, 10009}
 REASON_ORDER_SEND_RETCODE_NOT_OK = "ORDER_SEND_RETCODE_NOT_OK"
 
 

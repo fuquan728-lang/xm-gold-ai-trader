@@ -118,7 +118,7 @@ class FakeDemoOrderClient:
         self.order_check_calls.append(request)
         return SimpleNamespace(retcode=self.order_check_retcode, comment="check")
 
-    def order_send_checked(self, request, order_check_result):
+    def order_send_checked(self, request, order_check_result, **kwargs):
         self.order_send_checked_calls.append({"request": request, "order_check_result": order_check_result})
         return SimpleNamespace(retcode=self.order_send_retcode, order=999, comment="sent")
 

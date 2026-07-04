@@ -500,7 +500,18 @@ class MarginManager:
             margin_needed = position_size * margin_per_lot * vol_impact
             
             # 检查保证金是否充足
-            margin_sufficient = margin_free >= margin_needed
+            # 注意：File模式EA不推送实时账户数据，margin_free可能为0
+            # 当margin_level很高但margin_free=0时，说明数据不完整，应视为保证金充足
+            margin_level_float = float(margin_level) if margin_level else 0.0
+            
+            if margin_free <= 0 and margin_level_float > 200.0:
+                # 数据不完整（margin_level高但margin_free为0），
+                # 这是File模式下的正常现象，按保证金充足处理
+                margin_sufficient = True
+                if margin_level_float > 1000.0:
+                    margin_level_float = 1000.0  # 无真实数据时限制显示值
+            else:
+                margin_sufficient = margin_free >= margin_needed
             
             # 计算保证金使用率
             margin_used_ratio = margin_needed / margin_free if margin_free > 0 else 0
@@ -510,10 +521,10 @@ class MarginManager:
                 "margin_needed": margin_needed,
                 "margin_available": margin_free,
                 "margin_sufficient": margin_sufficient,
-                "margin_level": margin_level,
+                "margin_level": margin_level_float,
                 "margin_used_ratio": margin_used_ratio,
                 "recommended_max_position": self._calculate_recommended_max_position(
-                    symbol, margin_free, margin_level
+                    symbol, margin_free, margin_level_float
                 ),
                 "warning_level": "none"
             }

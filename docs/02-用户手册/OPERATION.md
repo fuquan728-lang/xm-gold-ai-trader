@@ -18,7 +18,7 @@
 
 3. **启动MT5 EA**：
    - 打开MetaTrader 5
-   - 在交易品种图表上添加 `AI_Trader_Integrated_Socket`
+   - 在交易品种图表上添加 `AI_Trader_V3.2_Integrated`
    - 确认EA初始化成功
 
 4. **监控运行状态**：

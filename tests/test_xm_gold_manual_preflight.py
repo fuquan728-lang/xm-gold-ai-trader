@@ -91,7 +91,7 @@ class FakeManualClient:
         self.order_check_calls.append(request)
         return SimpleNamespace(retcode=self.order_check_retcode, comment="ok")
 
-    def order_send_checked(self, request, order_check_result):
+    def order_send_checked(self, request, order_check_result, **kwargs):
         self.order_send_calls.append({"request": request, "order_check_result": order_check_result})
         raise AssertionError("manual preflight must never call order_send_checked")
 

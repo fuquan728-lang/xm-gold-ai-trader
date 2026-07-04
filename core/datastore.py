@@ -306,6 +306,16 @@ class DataStore:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             
+            # 查询开仓时间戳，计算实际持仓时长
+            cursor.execute('SELECT timestamp FROM trades WHERE id = ?', (trade_id,))
+            row = cursor.fetchone()
+            close_time = time.time()
+            if row and row[0]:
+                hold_time_seconds = close_time - row[0]
+            else:
+                hold_time_seconds = 0.0
+                logger.warning(f"[WARN] 未找到交易 {trade_id} 的开仓时间戳，hold_time 设为 0")
+            
             cursor.execute('''
                 UPDATE trades 
                 SET exit_price = ?, pnl = ?, pnl_percent = ?, 
@@ -316,12 +326,12 @@ class DataStore:
                 pnl,
                 pnl_percent,
                 TradeStatus.CLOSED.value,
-                time.time(),  # 简化的持仓时间
+                hold_time_seconds,
                 trade_id
             ))
             
             conn.commit()
-            logger.info(f"[OK] 交易已平仓 [ID: {trade_id}]: PnL={pnl}")
+            logger.info(f"[OK] 交易已平仓 [ID: {trade_id}]: PnL={pnl}, 持仓{hold_time_seconds/60:.1f}分钟")
     
     def record_market_state(
         self,

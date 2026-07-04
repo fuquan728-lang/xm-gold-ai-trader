@@ -30,6 +30,7 @@ from src.broker.execution_safety import (
     evaluate_execution_safety,
     order_check_failure_decision,
     order_check_passed,
+    order_send_passed,
     position_matches,
 )
 from src.broker.mt5_client import MT5Client, MT5ClientError
@@ -339,11 +340,11 @@ def _manual_demo_micro_order_locked(
         decision = order_check_failure_decision(order_check_result)
         return write_journal(journal_dir, block_event(event, decision.reason_codes, decision.reasons))
 
-    order_send_result = client.order_send_checked(request, order_check_result)
+    order_send_result = client.order_send_checked(request, order_check_result, require_success=False)
     event["order_send_attempts"] = 1
     event["order_send_result"] = result_to_dict(order_send_result)
     event["block_stage"] = "post_order_send"
-    if not order_check_passed(order_send_result):
+    if not order_send_passed(order_send_result):
         reasons = (f"{REASON_ORDER_SEND_RETCODE_NOT_OK}: order_send retcode was not successful",)
         return write_journal(journal_dir, block_event(event, (REASON_ORDER_SEND_RETCODE_NOT_OK,), reasons))
 

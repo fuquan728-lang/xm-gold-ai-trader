@@ -29,10 +29,12 @@ from collections import deque
 # 引入核心模块
 try:
     import websockets
-    from websockets.server import WebSocketServerProtocol
     HAS_WEBSOCKETS = True
 except ImportError:
+    websockets = None
     HAS_WEBSOCKETS = False
+
+WebSocketServerProtocol = Any
 
 try:
     import aiohttp
@@ -586,7 +588,7 @@ class PerformanceMonitor:
     def __init__(self, window_size: int = 1000):
         self.window_size = window_size
         self.metrics: List[ConnectionMetric] = []
-        self.lock = threading.RLock()
+        self.lock = asyncio.Lock()  # asyncio.Lock for async context safety
         
         # 统计信息
         self.total_operations = 0
@@ -617,8 +619,7 @@ class PerformanceMonitor:
         )
         metric.calculate_latency()
         
-        with self.lock:
-            # 添加到指标列表
+        async with self.lock:
             self.metrics.append(metric)
             if len(self.metrics) > self.window_size:
                 self.metrics.pop(0)
@@ -633,9 +634,9 @@ class PerformanceMonitor:
             
             self.total_data += data_size
     
-    def get_stats(self) -> Dict[str, Any]:
+    async def get_stats(self) -> Dict[str, Any]:
         """获取性能统计"""
-        with self.lock:
+        async with self.lock:
             if not self.metrics:
                 return {}
             
@@ -672,7 +673,7 @@ class PerformanceMonitor:
     
     async def reset(self):
         """重置统计信息"""
-        with self.lock:
+        async with self.lock:
             self.metrics.clear()
             self.total_operations = 0
             self.successful_operations = 0
@@ -852,7 +853,7 @@ class AsyncOptimizer:
     async def get_performance_stats(self) -> Dict[str, Any]:
         """获取性能统计"""
         if self.monitor:
-            stats = self.monitor.get_stats()
+            stats = await self.monitor.get_stats()
             stats.update({
                 "http_pool_active": self.http_pool.active_count,
                 "ws_pool_active": self.ws_pool.active_count,

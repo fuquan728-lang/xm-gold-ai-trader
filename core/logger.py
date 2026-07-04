@@ -8,6 +8,7 @@
 import sys
 import logging
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -117,11 +118,17 @@ def setup_logger(name: str = "mt5_ai",
     console_handler.setFormatter(console_formatter)
     logger.addHandler(console_handler)
     
-    # 文件处理器（可选）
+    # 文件处理器（带轮转，防止日志无限增长）
     if log_file:
         try:
             log_path = Path(log_file)
-            file_handler = logging.FileHandler(log_path, encoding='utf-8')
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            file_handler = RotatingFileHandler(
+                log_path,
+                encoding='utf-8',
+                maxBytes=10 * 1024 * 1024,  # 10MB
+                backupCount=5
+            )
             file_handler.setLevel(level)
             
             file_formatter = logging.Formatter(
@@ -130,7 +137,7 @@ def setup_logger(name: str = "mt5_ai",
             )
             file_handler.setFormatter(file_formatter)
             logger.addHandler(file_handler)
-            logger.info(f"[LOG] 日志已保存到: {log_path}")
+            logger.info(f"[LOG] 日志已保存到: {log_path} (轮转: 10MB x 5)")
         except Exception as e:
             print(f"[WARN]  无法创建日志文件: {e}")
     

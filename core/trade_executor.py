@@ -175,6 +175,10 @@ class TradingInterface(ABC):
 class MT5TradingInterface(TradingInterface):
     """MT5交易接口"""
     
+    # 类级别安全标志：实盘模式禁用模拟价格
+    _live_trading_enabled: bool = False
+    _simulation_warning_issued: bool = False
+    
     def __init__(self):
         self.connected = False
         self.orders: Dict[str, Order] = {}
@@ -183,7 +187,33 @@ class MT5TradingInterface(TradingInterface):
         # 使用文件通信与MT5 EA交互
         self.file_handler = None  # 将使用现有的file_handler
         
+        # 安全检查：实盘模式提示
+        if not MT5TradingInterface._live_trading_enabled:
+            logger.warning(
+                "[SAFETY] MT5TradingInterface running in SIMULATION mode. "
+                "Real MT5 terminal connection not verified. "
+                "Set MT5TradingInterface.enable_live_trading() to use live data."
+            )
+        
         logger.info("MT5交易接口初始化完成")
+    
+    @classmethod
+    def enable_live_trading(cls, confirm: bool = False):
+        """启用实盘交易模式（需显式确认）
+        
+        Args:
+            confirm: 必须显式传入 True 才能启用
+        """
+        if not confirm:
+            logger.error("[SAFETY] enable_live_trading requires confirm=True")
+            raise ValueError("Must explicitly pass confirm=True to enable live trading")
+        cls._live_trading_enabled = True
+        logger.warning("[SAFETY] LIVE TRADING MODE ENABLED - using real MT5 terminal data")
+    
+    @classmethod
+    def is_live_mode(cls) -> bool:
+        """检查是否为实盘模式"""
+        return cls._live_trading_enabled
     
     def connect(self) -> bool:
         """连接到MT5平台"""
@@ -398,9 +428,27 @@ class MT5TradingInterface(TradingInterface):
     def get_account_info(self) -> Dict[str, Any]:
         """获取MT5账户信息"""
         try:
-            # 简化实现，返回模拟数据
-            # 实际应从MT5终端获取真实数据
+            if self._live_trading_enabled:
+                from core.mql5_data import get_mql5_data_manager
+                mql5 = get_mql5_data_manager()
+                raw = mql5.get_raw_data()
+                account = raw.get("account_info", {})
+                if account:
+                    return {
+                        "balance": account.get("balance", 0.0),
+                        "equity": account.get("equity", 0.0),
+                        "margin": account.get("margin", 0.0),
+                        "free_margin": account.get("margin_free", 0.0),
+                        "margin_level": account.get("margin_level", 0.0),
+                        "profit": account.get("profit", 0.0),
+                        "currency": account.get("currency", "USD"),
+                        "leverage": account.get("leverage", 100),
+                        "account_number": account.get("login", ""),
+                        "server": account.get("server", "")
+                    }
             
+            # 模拟模式
+            logger.warning("[SAFETY] SIMULATION account info in use")
             account_info = {
                 "balance": 10000.0,
                 "equity": 10250.0,
@@ -410,8 +458,8 @@ class MT5TradingInterface(TradingInterface):
                 "profit": 250.0,
                 "currency": "USD",
                 "leverage": 100,
-                "account_number": "123456",
-                "server": "XMGlobal-MT5"
+                "account_number": "SIMULATED",
+                "server": "SIMULATION"
             }
             
             return account_info
@@ -423,15 +471,33 @@ class MT5TradingInterface(TradingInterface):
     def get_market_price(self, symbol: str) -> Optional[float]:
         """获取MT5市场价格"""
         try:
-            # 简化实现，返回模拟价格
-            # 实际应从MT5终端获取实时报价
+            if self._live_trading_enabled:
+                # 实盘模式：从MQL5 Data Manager获取真实报价
+                from core.mql5_data import get_mql5_data_manager
+                mql5 = get_mql5_data_manager()
+                raw = mql5.get_raw_data()
+                positions_data = raw.get("positions", [])
+                for pos in positions_data:
+                    if pos.get("symbol", "").upper() == symbol.upper():
+                        return pos.get("current_price", None)
+                logger.warning(f"[SAFETY] Live mode: no real-time price for {symbol}, returning None")
+                return None
             
+            # 模拟模式：返回硬编码参考价格（仅用于测试）
+            if not MT5TradingInterface._simulation_warning_issued:
+                MT5TradingInterface._simulation_warning_issued = True
+                logger.warning(
+                    "[SAFETY] SIMULATION PRICES in use! Prices are HARDCODED and STALE. "
+                    "Call MT5TradingInterface.enable_live_trading(confirm=True) for real data."
+                )
+            
+            # 已更新为2026年参考价格
             price_map = {
-                "EURUSD": 1.0850,
-                "GBPUSD": 1.2650,
-                "USDJPY": 151.50,
-                "GOLD": 2350.0,
-                "XAUUSD": 2350.0
+                "EURUSD": 1.0720,
+                "GBPUSD": 1.2680,
+                "USDJPY": 149.50,
+                "GOLD": 3250.0,     # 2026年黄金价格范围
+                "XAUUSD": 3250.0
             }
             
             return price_map.get(symbol, 0.0)

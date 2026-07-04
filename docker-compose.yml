@@ -1,0 +1,51 @@
+# ========================================
+# XM Global MT5 — Docker Compose
+# ========================================
+# Start:  docker compose up -d
+# Stop:   docker compose down
+# Logs:   docker compose logs -f
+# ========================================
+
+version: "3.9"
+
+services:
+  ai-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: xm-mt5-ai:latest
+    container_name: xm-mt5-ai
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+      - "8080:8080"
+    volumes:
+      - ./logs:/app/logs:rw
+      - ./data:/app/data:rw
+      - ./MQL5/Files:/app/MQL5/Files:rw
+      - ./mt5_ai_service.py:/app/mt5_ai_service.py:ro
+      - ./scripts:/app/scripts:ro
+      - ./.env:/app/.env:ro
+      - ./configs:/app/configs:ro
+    environment:
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - .env
+    healthcheck:
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      - mt5-network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+networks:
+  mt5-network:
+    driver: bridge

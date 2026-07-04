@@ -28,7 +28,7 @@
 
 ### 文件结构
 ```
-MQL5/Experts/AI_Trader_Integrated_Socket.mq5
+MQL5/Experts/AI_Trader_V3.2_Integrated.mq5
 ├── 全局变量和常量定义
 ├── 输入参数配置
 ├── 通信模块
@@ -740,7 +740,7 @@ public:
 
 ### 编译和部署
 1. **编译EA**：
-   - 在MetaEditor中打开 `AI_Trader_Integrated_Socket.mq5`
+   - 在MetaEditor中打开 `AI_Trader_V3.2_Integrated.mq5`
    - 点击编译按钮（F7）
    - 确认无错误和警告
 
@@ -763,8 +763,8 @@ public:
 1. **备份当前版本**：
    ```mql5
    // 备份当前EA文件和配置
-   FileCopy("AI_Trader_Integrated_Socket.ex5", 
-            "AI_Trader_Integrated_Socket_backup.ex5", 0);
+   FileCopy("AI_Trader_V3.2_Integrated.ex5", 
+            "AI_Trader_V3.2_Integrated_backup.ex5", 0);
    ```
 
 2. **部署新版本**：

@@ -13,6 +13,7 @@ from src.broker.execution_safety import (
     REASON_EXPERT_TRADING_DISABLED,
     REASON_NON_DEMO_ACCOUNT,
     REASON_ORDER_CHECK_FAILED,
+    REASON_ORDER_SEND_FAILED,
     REASON_TRADE_NOT_ALLOWED,
     evaluate_execution_safety,
 )
@@ -63,10 +64,11 @@ def actionable_signal() -> TradeSignal:
 
 
 class FakePhase2Client:
-    def __init__(self, *, positions=None, account=None, order_check_retcode=0):
+    def __init__(self, *, positions=None, account=None, order_check_retcode=0, order_send_retcode=10009):
         self.positions = positions or []
         self.account = account or account_raw()
         self.order_check_retcode = order_check_retcode
+        self.order_send_retcode = order_send_retcode
         self.order_check_calls: list[dict] = []
         self.order_send_checked_calls: list[dict] = []
 
@@ -104,9 +106,9 @@ class FakePhase2Client:
         self.order_check_calls.append(request)
         return SimpleNamespace(retcode=self.order_check_retcode, comment="check")
 
-    def order_send_checked(self, request, order_check_result):
+    def order_send_checked(self, request, order_check_result, **kwargs):
         self.order_send_checked_calls.append({"request": request, "order_check_result": order_check_result})
-        return SimpleNamespace(retcode=10009, order=999)
+        return SimpleNamespace(retcode=self.order_send_retcode, order=999, comment="sent")
 
 
 def test_emergency_stop_blocks_everything():
@@ -189,6 +191,18 @@ def test_order_check_failure_blocks_order_send():
     assert client.order_send_checked_calls == []
 
 
+def test_order_send_failure_retcode_blocks_demo_micro_order():
+    client = FakePhase2Client(order_send_retcode=10030)
+    config = TradingConfig(execution=ExecutionConfig(allow_order_send=True))
+
+    event = execute_demo_micro_order(client, config, actionable_signal())
+
+    assert event["final_decision"] == "BLOCK"
+    assert REASON_ORDER_SEND_FAILED in event["reason_codes"]
+    assert event["orders_sent"] == 0
+    assert len(client.order_send_checked_calls) == 1
+
+
 def test_existing_magic_position_blocks_new_order():
     position = SimpleNamespace(symbol="GOLD_", magic=26052601, volume=0.01, ticket=1)
     client = FakePhase2Client(positions=[position])
@@ -215,3 +229,16 @@ def test_close_demo_positions_only_targets_matching_symbol_and_magic():
     assert len(event["target_positions"]) == 1
     assert event["target_positions"][0]["ticket"] == 1
     assert client.order_send_checked_calls[0]["request"]["position"] == 1
+
+
+def test_close_demo_positions_failed_order_send_does_not_count_as_closed():
+    matching = SimpleNamespace(symbol="GOLD_", magic=26052601, volume=0.01, ticket=1)
+    client = FakePhase2Client(positions=[matching], order_send_retcode=10030)
+    config = TradingConfig(execution=ExecutionConfig(allow_order_send=True))
+
+    event = close_matching_demo_positions(client, config)
+
+    assert event["final_decision"] == "BLOCK"
+    assert event["orders_sent"] == 0
+    assert REASON_ORDER_SEND_FAILED in event["reason_codes"]
+    assert event["close_attempts"][0]["sent"] is False

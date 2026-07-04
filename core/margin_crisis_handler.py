@@ -15,6 +15,7 @@ from enum import Enum
 from core.logger import logger
 from core.mql5_data import get_mql5_data_manager
 from core.margin_manager import get_margin_manager, MarginLevel, MarginRiskAction
+from core.file_handler import file_handler
 
 
 class CrisisSeverity(Enum):
@@ -719,40 +720,176 @@ class MarginCrisisHandler:
         """平小额持仓（小于0.1手）"""
         small_positions = [p for p in positions_to_close if p.volume < 0.1]
         
-        if small_positions:
-            logger.warning(f"[CRISIS] 准备平小额持仓: {len(small_positions)}个")
-            # 这里需要与交易执行器集成
-            # 实际平仓操作在真实系统中实现
+        if not small_positions:
+            logger.info("[CRISIS] No small positions to close")
+            return
+        
+        logger.warning(f"[CRISIS] Closing small positions: {len(small_positions)} position(s)")
+        
+        fh = file_handler
+        for pos in small_positions:
+            try:
+                close_order = {
+                    "action": "close_position",
+                    "ticket": pos.ticket,
+                    "symbol": pos.symbol,
+                    "volume": pos.volume,
+                    "type": "SELL" if pos.type.upper() == "BUY" else "BUY",
+                    "reason": f"margin_crisis_small_close",
+                    "priority_score": pos.priority_score
+                }
+                # 通过文件通信发送平仓指令到MQL5 EA
+                fh.write_json_to_file("close_order.json", close_order)
+                logger.warning(
+                    f"[CRISIS] Sent close order: ticket={pos.ticket} "
+                    f"{pos.symbol} {pos.volume}lot profit=${pos.profit:.2f}"
+                )
+            except Exception as e:
+                logger.error(f"[ERR] Failed to close position {pos.ticket}: {e}")
     
     def _close_losing_positions(self, positions_to_close: List[PositionToClose]):
         """平亏损持仓"""
-        losing_positions = [p for p in positions_to_close if p.profit < 0]
+        losing_positions = sorted(
+            [p for p in positions_to_close if p.profit < 0],
+            key=lambda p: p.profit  # 亏损最多的优先
+        )
         
-        if losing_positions:
-            logger.warning(f"[CRISIS] 准备平亏损持仓: {len(losing_positions)}个")
-            # 这里需要与交易执行器集成
+        if not losing_positions:
+            logger.info("[CRISIS] No losing positions to close")
+            return
+        
+        logger.warning(f"[CRISIS] Closing losing positions: {len(losing_positions)} position(s)")
+        
+        fh = file_handler
+        for pos in losing_positions:
+            try:
+                close_order = {
+                    "action": "close_position",
+                    "ticket": pos.ticket,
+                    "symbol": pos.symbol,
+                    "volume": pos.volume,
+                    "type": "SELL" if pos.type.upper() == "BUY" else "BUY",
+                    "reason": "margin_crisis_losing_close",
+                    "priority_score": pos.priority_score,
+                    "profit": pos.profit
+                }
+                fh.write_json_to_file("close_order.json", close_order)
+                logger.warning(
+                    f"[CRISIS] Sent close order: ticket={pos.ticket} "
+                    f"{pos.symbol} {pos.volume}lot loss=${pos.profit:.2f}"
+                )
+            except Exception as e:
+                logger.error(f"[ERR] Failed to close position {pos.ticket}: {e}")
     
     def _close_all_positions(self, positions_to_close: List[PositionToClose]):
         """平所有持仓"""
-        if positions_to_close:
-            logger.warning(f"[CRISIS] 准备平所有持仓: {len(positions_to_close)}个")
-            # 这里需要与交易执行器集成
+        if not positions_to_close:
+            logger.warning("[CRISIS] No positions to close (already flat)")
+            return
+        
+        logger.warning(f"[CRISIS] CLOSING ALL POSITIONS: {len(positions_to_close)} position(s)")
+        
+        fh = file_handler
+        for pos in positions_to_close:
+            try:
+                close_order = {
+                    "action": "close_position",
+                    "ticket": pos.ticket,
+                    "symbol": pos.symbol,
+                    "volume": pos.volume,
+                    "type": "SELL" if pos.type.upper() == "BUY" else "BUY",
+                    "reason": "margin_crisis_close_all",
+                    "priority_score": pos.priority_score
+                }
+                fh.write_json_to_file("close_order.json", close_order)
+                logger.warning(
+                    f"[CRISIS] Sent CLOSE ALL order: ticket={pos.ticket} "
+                    f"{pos.symbol} {pos.volume}lot"
+                )
+            except Exception as e:
+                logger.error(f"[ERR] Failed to close all position {pos.ticket}: {e}")
     
     def _stop_all_trading(self):
-        """停止所有交易"""
-        logger.warning("[CRISIS] 停止所有交易活动")
-        # 需要与风险管理和交易执行器集成
+        """停止所有交易活动"""
+        logger.warning("[CRISIS] STOPPING ALL TRADING ACTIVITY")
+        
+        # 1. 设置全局停止标志
+        self.in_crisis_mode = True
+        
+        # 2. 通知风险管理器进入紧急模式
+        try:
+            from core.risk_manager import get_risk_manager
+            rm = get_risk_manager()
+            rm.is_crisis_mode = True
+            logger.warning("[CRISIS] Risk manager set to CRISIS MODE")
+        except Exception as e:
+            logger.error(f"[ERR] Failed to notify risk manager: {e}")
+        
+        # 3. 通过文件通信通知MQL5 EA停止交易
+        try:
+            fh = file_handler
+            fh.write_json_to_file("crisis_stop.json", {
+                "action": "stop_all_trading",
+                "timestamp": datetime.now().isoformat(),
+                "reason": "margin_crisis_critical"
+            })
+            logger.warning("[CRISIS] Stop-trading signal sent to MQL5 EA")
+        except Exception as e:
+            logger.error(f"[ERR] Failed to send stop signal: {e}")
     
     def _apply_risk_adjustments(self, adjustments: Dict[str, Any]):
-        """应用风险调整"""
-        logger.warning(f"[CRISIS] 应用风险调整: {adjustments}")
-        # 需要与风险管理器和AI引擎集成
+        """应用风险调整到风险管理器"""
+        logger.warning(f"[CRISIS] Applying risk adjustments: trading={adjustments.get('trading_enabled', 'N/A')}")
+        
+        try:
+            from core.risk_manager import get_risk_manager
+            rm = get_risk_manager()
+            
+            # 推送风险参数调整
+            if adjustments.get("trading_enabled") is False:
+                rm.is_crisis_mode = True
+                logger.warning("[CRISIS] Trading DISABLED via risk adjustments")
+            
+            # 更新风险参数
+            rm.crisis_risk_params = {
+                "risk_per_trade": adjustments.get("risk_per_trade", 0.01),
+                "max_position_size": adjustments.get("max_position_size", 0.05),
+                "stop_loss_multiplier": adjustments.get("stop_loss_multiplier", 1.0),
+                "take_profit_multiplier": adjustments.get("take_profit_multiplier", 1.0),
+                "volatility_multiplier": adjustments.get("volatility_multiplier", 1.0),
+                "trading_enabled": adjustments.get("trading_enabled", True),
+                "applied_at": datetime.now().isoformat()
+            }
+            logger.warning(f"[CRISIS] Risk parameters adjusted: {rm.crisis_risk_params}")
+            
+        except Exception as e:
+            logger.error(f"[ERR] Failed to apply risk adjustments: {e}")
     
     def _send_user_notifications(self, notifications: List[str]):
-        """发送用户通知"""
+        """发送用户通知（日志 + 文件记录）"""
         for notification in notifications:
             logger.warning(f"[USER NOTIFICATION] {notification}")
-        # 实际应用中可能需要通过邮件、短信等方式通知
+        
+        # 持久化通知记录
+        try:
+            fh = file_handler
+            existing = []
+            try:
+                existing = fh.read_json_from_file("crisis_notifications.json") or []
+            except Exception:
+                pass
+            
+            existing.append({
+                "timestamp": datetime.now().isoformat(),
+                "notifications": notifications
+            })
+            # 保留最近50条
+            if len(existing) > 50:
+                existing = existing[-50:]
+            
+            fh.write_json_to_file("crisis_notifications.json", existing)
+        except Exception as e:
+            logger.error(f"[ERR] Failed to persist notifications: {e}")
     
     def get_crisis_report(self) -> Dict[str, Any]:
         """获取危机报告"""

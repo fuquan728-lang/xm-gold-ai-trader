@@ -17,7 +17,7 @@ MT5 AI交易系统使用多级配置系统：
 ```env
 # ==================== DeepSeek AI配置 ====================
 USE_DEEPSEEK=true                    # 启用AI功能（true/false）
-DEEPSEEK_API_KEY=sk-您的密钥         # DeepSeek API密钥（必需）
+DEEPSEEK_API_KEY=<set-in-system-environment>  # DeepSeek API密钥（必需）
 DEEPSEEK_API_URL=https://api.deepseek.com/v1/chat/completions  # API地址
 DEEPSEEK_MODEL=deepseek-chat         # 使用的模型
 DEEPSEEK_MAX_TOKENS=1000             # 最大响应长度
@@ -269,7 +269,7 @@ copy .env.backup.20240421 .env
 ```env
 # 使用环境变量而非文件存储密钥
 # 在系统环境变量中设置：
-# DEEPSEEK_API_KEY=sk-...
+# DEEPSEEK_API_KEY=<set-in-system-environment>
 
 # 限制服务访问
 SOCKET_HOST=127.0.0.1  # 仅本地访问

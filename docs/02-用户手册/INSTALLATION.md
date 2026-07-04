@@ -48,7 +48,7 @@ copy .env.example .env
 # 使用文本编辑器打开.env文件
 # 主要配置项：
 #   USE_DEEPSEEK=true                   # 启用AI功能
-#   DEEPSEEK_API_KEY=sk-您的密钥        # 必须设置
+#   DEEPSEEK_API_KEY=<set-in-system-environment>  # 必须设置
 #   SOCKET_HOST=127.0.0.1              # 服务监听地址
 #   SOCKET_PORT=8080                   # Socket端口
 #   WEBSOCKET_PORT=8081                # WebSocket端口
@@ -61,12 +61,15 @@ copy .env.example .env
    - 路径通常为：`C:\Users\<用户名>\AppData\Roaming\MetaQuotes\Terminal\<终端ID>\`
 
 2. **复制EA文件**：
-   - 将 `MQL5/Experts/AI_Trader_Integrated_Socket.mq5` 复制到 `MQL5/Experts/` 目录
+   - 推荐先将 `MQL5/Experts/XM_Gold_AI_Trader_SafetyGuard.mq5` 复制到 `MQL5/Experts/` 目录，只读监控，不下单
+   - 需要自动交易时，使用 `MQL5/Experts/AI_Trader_V3.2_Integrated.mq5`，并保持默认 `InpAllowLiveTrading=false`、`InpRequireDemoAccount=true`
+   - 不要使用 `AI_Trader_V2.1_Safe.mq5` 作为自动交易入口；该 Legacy EA 默认 `InpAllowOrderExecution=false`
+   - `AI_Trader_Integrated_Socket.mq5` 是 Legacy/Archive，不作为新安装入口
    - 将 `MQL5/Include/` 中的头文件复制到对应目录（如果需要）
 
 3. **编译EA**：
    - 在MT5中打开MetaEditor（F4）
-   - 导航到 `Experts/AI_Trader_Integrated_Socket.mq5`
+   - 优先导航到 `Experts/XM_Gold_AI_Trader_SafetyGuard.mq5`
    - 点击编译按钮（F7）
    - 确认无错误信息
 

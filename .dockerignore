@@ -1,0 +1,52 @@
+# Docker build context exclusion
+__pycache__
+*.pyc
+*.pyo
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Logs and data (mounted at runtime)
+logs/
+data/
+*.log
+*.jsonl
+
+# MT5 binaries and config
+MQL5/
+Bases/
+Config/
+Profiles/
+Sounds/
+Tester/
+*.exe
+*.dll
+*.ico
+
+# IDE and tools
+.vscode/
+.idea/
+*.sln
+*.csproj
+
+# Archive
+archive/
+docs/
+
+# Environment (mounted at runtime)
+.env.example
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# CI/CD
+.github/
+.github-ci.yml
+
+# Tests (not needed in production image)
+tests/
+pytest.ini

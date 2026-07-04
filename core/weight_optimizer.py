@@ -7,6 +7,7 @@
 
 import json
 import time
+import threading
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
@@ -100,6 +101,9 @@ class WeightOptimizer:
         self.weights_history: List[WeightSnapshot] = []
         self.signal_history: List[TradeSignal] = []
         
+        # 文件写入锁（防止多线程同时保存导致文件损坏）
+        self._save_lock = threading.Lock()
+        
         # 状态管理
         self.last_adjustment_time = 0.0
         
@@ -131,15 +135,16 @@ class WeightOptimizer:
             self.logger.warning(f"[WARN]  加载权重历史失败: {str(e)}")
     
     def _save_weights(self) -> None:
-        """保存权重历史"""
+        """保存权重历史（线程安全）"""
         try:
-            weights_file = self.data_dir / "weights_history.json"
-            data = {
-                'last_updated': time.time(),
-                'history': [asdict(ws) for ws in self.weights_history]
-            }
-            with open(weights_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+            with self._save_lock:
+                weights_file = self.data_dir / "weights_history.json"
+                data = {
+                    'last_updated': time.time(),
+                    'history': [asdict(ws) for ws in self.weights_history]
+                }
+                with open(weights_file, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
             self.logger.error(f"[ERR] 保存权重历史失败: {str(e)}")
     

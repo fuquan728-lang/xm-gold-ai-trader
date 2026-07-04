@@ -20,6 +20,8 @@ from src.broker.execution_safety import (
     REASON_ORDER_CHECK_FAILED,
     evaluate_execution_safety,
     order_check_passed,
+    order_send_failure_decision,
+    order_send_passed,
     position_matches,
 )
 from src.broker.mt5_client import MT5Client, MT5ClientError
@@ -113,18 +115,32 @@ def close_matching_demo_positions(
             attempt["reasons"] = [f"{REASON_ORDER_CHECK_FAILED}: order_check did not pass"]
             event["close_attempts"].append(attempt)
             continue
-        send_result = client.order_send_checked(request, check_result)
+        send_result = client.order_send_checked(request, check_result, require_success=False)
         attempt["order_send_result"] = result_to_dict(send_result)
-        attempt["sent"] = True
-        event["orders_sent"] += 1
+        if order_send_passed(send_result):
+            attempt["sent"] = True
+            event["orders_sent"] += 1
+        else:
+            send_decision = order_send_failure_decision(send_result)
+            attempt["reason_codes"] = list(send_decision.reason_codes)
+            attempt["reasons"] = list(send_decision.reasons)
         event["close_attempts"].append(attempt)
 
     if event["orders_sent"] > 0:
         event["final_decision"] = "CLOSED"
     else:
         event["final_decision"] = "BLOCK"
-        event["reason_codes"] = [REASON_ORDER_CHECK_FAILED]
-        event["reasons"] = [f"{REASON_ORDER_CHECK_FAILED}: all close order_check calls failed"]
+        reason_codes = [
+            str(code)
+            for attempt in event["close_attempts"]
+            for code in attempt.get("reason_codes", [])
+        ]
+        event["reason_codes"] = sorted(set(reason_codes)) or [REASON_ORDER_CHECK_FAILED]
+        event["reasons"] = [
+            str(reason)
+            for attempt in event["close_attempts"]
+            for reason in attempt.get("reasons", [])
+        ] or [f"{REASON_ORDER_CHECK_FAILED}: all close order_check calls failed"]
     return event
 
 

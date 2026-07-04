@@ -9,6 +9,10 @@ echo.
 
 cd /d "%~dp0"
 
-python mt5_ai_service.py
+if exist "venv\Scripts\activate.bat" (
+    call "venv\Scripts\activate.bat"
+)
+
+python mt5_ai_service.py --mode file
 
 pause
