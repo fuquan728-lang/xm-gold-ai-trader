@@ -1,10 +1,24 @@
-# MT5AITradingService God Class 拆分设计方案
+# MT5AITradingService God Class 拆分 — 实施记录
 
-**日期**: 2026-07-04 | **状态**: 设计阶段 | **预估工作量**: 3天
+**设计日期**: 2026-07-04 | **状态**: ✅ 已完成 | **最终行数**: 472 行（原 1574 行，-70%）
 
 ---
 
-## 1. 现状分析
+## 实施概览
+
+原 `MT5AITradingService` 拆分为 `mt5_ai_service.py`（472行）主入口 + 5 个 `core/service/` 子模块（共 1669 行）：
+
+| 模块 | 行数 | 职责 |
+|------|------|------|
+| `core/service/ai_coordinator.py` | 435 | AI分析委托 + SL/TP动态计算 |
+| `core/service/communication.py` | 500 | File/Socket/WebSocket 三种通信模式 |
+| `core/service/monitor.py` | 301 | 心跳 + 账户监控 + 交易统计 |
+| `core/service/request_processor.py` | 293 | 请求管道处理 |
+| `core/service/utils.py` | 129 | 公共工具函数 |
+| **总计** | **1658** | |
+| `mt5_ai_service.py` (主入口) | 472 | 生命周期 + 依赖注入 + 委托分发 |
+
+## 1. 现状分析（已完成）
 
 `mt5_ai_service.py` 中 `MT5AITradingService` 类共 **1574行**，承载了4类职责，违反单一职责原则：
 
@@ -186,8 +200,8 @@ class MT5AITradingService:
 
 ## 6. 实施检查清单
 
-- [ ] Phase 1: ServiceMonitor 提取 + 测试通过
-- [ ] Phase 2: Communication 提取 + 3种模式各自可独立启动
-- [ ] Phase 3: AICoordinator 提取 + 完整管道测试
-- [ ] Phase 4: RequestProcessor 提取 + 端到端集成测试
-- [ ] Phase 5: 清理 `mt5_ai_service.py` 冗余代码
+- [x] Phase 1: ServiceMonitor 提取 + 测试通过（→ `core/service/monitor.py` 301行）
+- [x] Phase 2: Communication 提取 + 3种模式各自可独立启动（→ `core/service/communication.py` 500行）
+- [x] Phase 3: AICoordinator 提取 + 完整管道测试（→ `core/service/ai_coordinator.py` 435行）
+- [x] Phase 4: RequestProcessor 提取 + 端到端集成测试（→ `core/service/request_processor.py` 293行）
+- [x] Phase 5: 清理 `mt5_ai_service.py` 冗余代码（1574→472行）

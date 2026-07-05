@@ -502,7 +502,7 @@ class MLPredictor:
                 "symbol": symbol,
                 "timeframe": timeframe,
                 "horizon": horizon.value,
-                "model_type": model_type.value,
+                "model_type": self.config.model_type.value,
                 "accuracy": float(accuracy),
                 "precision": float(precision),
                 "recall": float(recall),
